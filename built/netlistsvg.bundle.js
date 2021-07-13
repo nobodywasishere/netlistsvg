@@ -1,21 +1,39 @@
 (function(f){if(typeof exports==="object"&&typeof module!=="undefined"){module.exports=f()}else if(typeof define==="function"&&define.amd){define([],f)}else{var g;if(typeof window!=="undefined"){g=window}else if(typeof global!=="undefined"){g=global}else if(typeof self!=="undefined"){g=self}else{g=this}g.netlistsvg = f()}})(function(){var define,module,exports;return (function(){function r(e,n,t){function o(i,f){if(!n[i]){if(!e[i]){var c="function"==typeof require&&require;if(!f&&c)return c(i,!0);if(u)return u(i,!0);var a=new Error("Cannot find module '"+i+"'");throw a.code="MODULE_NOT_FOUND",a}var p=n[i]={exports:{}};e[i][0].call(p.exports,function(r){var n=e[i][1][r];return o(n||r)},p,p.exports,r,e,n,t)}return n[i].exports}for(var u="function"==typeof require&&require,i=0;i<t.length;i++)o(t[i]);return o}return r})()({1:[function(require,module,exports){
 "use strict";
+var __assign = (this && this.__assign) || function () {
+    __assign = Object.assign || function(t) {
+        for (var s, i = 1, n = arguments.length; i < n; i++) {
+            s = arguments[i];
+            for (var p in s) if (Object.prototype.hasOwnProperty.call(s, p))
+                t[p] = s[p];
+        }
+        return t;
+    };
+    return __assign.apply(this, arguments);
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 var FlatModule_1 = require("./FlatModule");
 var YosysModel_1 = require("./YosysModel");
 var Skin_1 = require("./Skin");
 var Port_1 = require("./Port");
+var drawModule_1 = require("./drawModule");
 var _ = require("lodash");
+var elkGraph_1 = require("./elkGraph");
 var clone = require("clone");
 var onml = require("onml");
 var Cell = /** @class */ (function () {
-    function Cell(key, type, inputPorts, outputPorts, attributes) {
+    function Cell(key, type, inputPorts, outputPorts, attributes, parent, subModule, depth) {
         var _this = this;
+        if (subModule === void 0) { subModule = null; }
+        if (depth === void 0) { depth = null; }
         this.key = key;
         this.type = type;
         this.inputPorts = inputPorts;
         this.outputPorts = outputPorts;
         this.attributes = attributes || {};
+        this.parent = parent;
+        this.subModule = subModule;
+        this.depth = depth;
         inputPorts.forEach(function (ip) {
             ip.parentNode = _this;
         });
@@ -28,14 +46,14 @@ var Cell = /** @class */ (function () {
      * @param yPort the Yosys Port with our port data
      * @param name the name of the port
      */
-    Cell.fromPort = function (yPort, name) {
+    Cell.fromPort = function (yPort, name, parent) {
         var isInput = yPort.direction === YosysModel_1.default.Direction.Input;
         if (isInput) {
-            return new Cell(name, '$_inputExt_', [], [new Port_1.Port('Y', yPort.bits)], {});
+            return new Cell(name, '$_inputExt_', [], [new Port_1.Port('Y', yPort.bits)], {}, parent);
         }
-        return new Cell(name, '$_outputExt_', [new Port_1.Port('A', yPort.bits)], [], {});
+        return new Cell(name, '$_outputExt_', [new Port_1.Port('A', yPort.bits)], [], {}, parent);
     };
-    Cell.fromYosysCell = function (yCell, name) {
+    Cell.fromYosysCell = function (yCell, name, parent) {
         this.setAlternateCellType(yCell);
         var template = Skin_1.default.findSkinType(yCell.type);
         var templateInputPids = Skin_1.default.getInputPids(template);
@@ -51,31 +69,31 @@ var Cell = /** @class */ (function () {
             inputPorts = ports.filter(function (port) { return port.keyIn(inputPids_1); });
             outputPorts = ports.filter(function (port) { return port.keyIn(outputPids_1); });
         }
-        return new Cell(name, yCell.type, inputPorts, outputPorts, yCell.attributes);
+        return new Cell(name, yCell.type, inputPorts, outputPorts, yCell.attributes, parent);
     };
-    Cell.fromConstantInfo = function (name, constants) {
-        return new Cell(name, '$_constant_', [], [new Port_1.Port('Y', constants)], {});
+    Cell.fromConstantInfo = function (name, constants, parent) {
+        return new Cell(name, '$_constant_', [], [new Port_1.Port('Y', constants)], {}, parent);
     };
     /**
      * creates a join cell
      * @param target string name of net (starts and ends with and delimited by commas)
      * @param sources list of index strings (one number, or two numbers separated by a colon)
      */
-    Cell.fromJoinInfo = function (target, sources) {
+    Cell.fromJoinInfo = function (target, sources, parent) {
         var signalStrs = target.slice(1, -1).split(',');
         var signals = signalStrs.map(function (ss) { return Number(ss); });
         var joinOutPorts = [new Port_1.Port('Y', signals)];
         var inPorts = sources.map(function (name) {
             return new Port_1.Port(name, getBits(signals, name));
         });
-        return new Cell('$join$' + target, '$_join_', inPorts, joinOutPorts, {});
+        return new Cell('$join$' + target, '$_join_', inPorts, joinOutPorts, {}, parent);
     };
     /**
      * creates a split cell
      * @param source string name of net (starts and ends with and delimited by commas)
      * @param targets list of index strings (one number, or two numbers separated by a colon)
      */
-    Cell.fromSplitInfo = function (source, targets) {
+    Cell.fromSplitInfo = function (source, targets, parent) {
         // turn string into array of signal names
         var sigStrs = source.slice(1, -1).split(',');
         // convert the signals into actual numbers
@@ -86,7 +104,25 @@ var Cell = /** @class */ (function () {
             var sigs = getBits(signals, name);
             return new Port_1.Port(name, sigs);
         });
-        return new Cell('$split$' + source, '$_split_', inPorts, splitOutPorts, {});
+        return new Cell('$split$' + source, '$_split_', inPorts, splitOutPorts, {}, parent);
+    };
+    Cell.createSubModule = function (yCell, name, parent, subModule, depth) {
+        var template = Skin_1.default.findSkinType(yCell.type);
+        var templateInputPids = Skin_1.default.getInputPids(template);
+        var templateOutputPids = Skin_1.default.getOutputPids(template);
+        var ports = _.map(yCell.connections, function (conn, portName) {
+            return new Port_1.Port(portName, conn);
+        });
+        var inputPorts = ports.filter(function (port) { return port.keyIn(templateInputPids); });
+        var outputPorts = ports.filter(function (port) { return port.keyIn(templateOutputPids); });
+        if (inputPorts.length + outputPorts.length !== ports.length) {
+            var inputPids_2 = YosysModel_1.default.getInputPortPids(yCell);
+            var outputPids_2 = YosysModel_1.default.getOutputPortPids(yCell);
+            inputPorts = ports.filter(function (port) { return port.keyIn(inputPids_2); });
+            outputPorts = ports.filter(function (port) { return port.keyIn(outputPids_2); });
+        }
+        var mod = new FlatModule_1.FlatModule(subModule, name, depth + 1, parent);
+        return new Cell(name, yCell.type, inputPorts, outputPorts, yCell.attributes, parent, mod, depth);
     };
     // Set cells to alternate types/tags based on their parameters
     Cell.setAlternateCellType = function (yCell) {
@@ -134,8 +170,9 @@ var Cell = /** @class */ (function () {
         return _.max([maxVal, atLeast]);
     };
     Cell.prototype.findConstants = function (sigsByConstantName, maxNum, constantCollector) {
+        var _this = this;
         this.inputPorts.forEach(function (ip) {
-            maxNum = ip.findConstants(sigsByConstantName, maxNum, constantCollector);
+            maxNum = ip.findConstants(sigsByConstantName, maxNum, constantCollector, _this.parent);
         });
         return maxNum;
     };
@@ -175,7 +212,7 @@ var Cell = /** @class */ (function () {
         return null;
     };
     Cell.prototype.getTemplate = function () {
-        return Skin_1.default.findSkinType(this.type);
+        return Skin_1.default.findSkinType(this.type, this.depth);
     };
     Cell.prototype.buildElkChild = function () {
         var _this = this;
@@ -209,13 +246,19 @@ var Cell = /** @class */ (function () {
                 return op.getGenericElkPort(i, outTemplates_1, 'out');
             });
             var cell = {
-                id: this.key,
+                id: this.parent + '.' + this.key,
                 width: Number(template[1]['s:width']),
                 height: Number(this.getGenericHeight()),
                 ports: inPorts.concat(outPorts),
                 layoutOptions: layoutAttrs,
                 labels: [],
             };
+            if (type === 'split') {
+                cell.ports[0].y = cell.height / 2;
+            }
+            if (type === 'join') {
+                cell.ports[cell.ports.length - 1].y = cell.height / 2;
+            }
             if (fixedPosX) {
                 cell.x = fixedPosX;
             }
@@ -225,9 +268,105 @@ var Cell = /** @class */ (function () {
             this.addLabels(template, cell);
             return cell;
         }
+        if (type === 'sub_odd' || type === 'sub_even') {
+            var inTemplates_2 = Skin_1.default.getPortsWithPrefix(template, 'in');
+            var outTemplates_2 = Skin_1.default.getPortsWithPrefix(template, 'out');
+            var inPorts_1 = this.inputPorts.map(function (ip, i) {
+                return ip.getGenericElkPort(i, inTemplates_2, 'in');
+            });
+            var outPorts = this.outputPorts.map(function (op, i) {
+                return op.getGenericElkPort(i, outTemplates_2, 'out');
+            });
+            var elk = elkGraph_1.buildElkGraph(this.subModule);
+            var cell_1 = {
+                id: this.parent + '.' + this.key,
+                layoutOptions: { 'org.eclipse.elk.portConstraints': 'FIXED_SIDE' },
+                labels: [],
+                ports: inPorts_1.concat(outPorts),
+                children: [],
+                edges: [],
+            };
+            _.forEach(elk.children, function (child) {
+                var inc = true;
+                _.forEach(cell_1.ports, function (port) {
+                    if (_this.parent + '.' + child.id === port.id) {
+                        inc = false;
+                    }
+                });
+                if (inc) {
+                    cell_1.children.push(child);
+                }
+            });
+            _.forEach(elk.edges, function (edge) {
+                var edgeAdd = edge;
+                _.forEach(cell_1.ports, function (port) {
+                    if (_.includes(inPorts_1, port)) {
+                        if (edgeAdd.sourcePort === port.id.slice(_this.parent.length + 1) + '.Y') {
+                            var source = port.id.split('.');
+                            source.pop();
+                            edgeAdd.source = source.join('.');
+                            edgeAdd.sourcePort = port.id;
+                        }
+                    }
+                    else {
+                        if (edgeAdd.targetPort === port.id.slice(_this.parent.length + 1) + '.A') {
+                            var target = port.id.split('.');
+                            target.pop();
+                            edgeAdd.target = target.join('.');
+                            edgeAdd.targetPort = port.id;
+                        }
+                    }
+                });
+                if (edgeAdd.source === edgeAdd.target) {
+                    var dummyId = _this.subModule.moduleName + '.$d_' + edgeAdd.sourcePort + '_' + edgeAdd.targetPort;
+                    var dummy = {
+                        id: dummyId,
+                        width: 0,
+                        height: 0,
+                        ports: [
+                            {
+                                id: dummyId + '.pin',
+                                width: 0,
+                                height: 0,
+                            },
+                            {
+                                id: dummyId + '.pout',
+                                width: 0,
+                                height: 0,
+                            },
+                        ],
+                        layoutOptions: { 'org.eclipse.elk.portConstraints': 'FIXED_SIDE' },
+                    };
+                    var edgeId = edgeAdd.id;
+                    var edgeAddCopy = __assign({}, edgeAdd);
+                    edgeAdd.target = dummyId;
+                    edgeAdd.targetPort = dummyId + '.pin';
+                    edgeAdd.id = _this.subModule.moduleName + '.e_' + edgeAdd.sourcePort + '_' + edgeAdd.targetPort;
+                    elkGraph_1.ElkModel.wireNameLookup[edgeAdd.id] = elkGraph_1.ElkModel.wireNameLookup[edgeId];
+                    edgeAddCopy.source = dummyId;
+                    edgeAddCopy.sourcePort = dummyId + '.pout';
+                    edgeAddCopy.id = _this.subModule.moduleName + '.e_' + edgeAddCopy.sourcePort +
+                        '_' + edgeAddCopy.targetPort;
+                    elkGraph_1.ElkModel.wireNameLookup[edgeAddCopy.id] = elkGraph_1.ElkModel.wireNameLookup[edgeId];
+                    cell_1.edges.push(edgeAdd, edgeAddCopy);
+                    cell_1.children.push(dummy);
+                }
+                else {
+                    cell_1.edges.push(edgeAdd);
+                }
+            });
+            if (fixedPosX) {
+                cell_1.x = fixedPosX;
+            }
+            if (fixedPosY) {
+                cell_1.y = fixedPosY;
+            }
+            this.addLabels(template, cell_1);
+            return cell_1;
+        }
         var ports = Skin_1.default.getPortsWithPrefix(template, '').map(function (tp) {
             return {
-                id: _this.key + '.' + tp[1]['s:pid'],
+                id: _this.parent + '.' + _this.key + '.' + tp[1]['s:pid'],
                 width: 0,
                 height: 0,
                 x: Number(tp[1]['s:x']),
@@ -236,7 +375,7 @@ var Cell = /** @class */ (function () {
         });
         var nodeWidth = Number(template[1]['s:width']);
         var ret = {
-            id: this.key,
+            id: this.parent + '.' + this.key,
             width: nodeWidth,
             height: Number(template[1]['s:height']),
             ports: ports,
@@ -289,24 +428,24 @@ var Cell = /** @class */ (function () {
         }
         else if (this.type === '$_join_') {
             setGenericSize(tempclone, Number(this.getGenericHeight()));
-            var inPorts_1 = Skin_1.default.getPortsWithPrefix(template, 'in');
-            var gap_2 = Number(inPorts_1[1][1]['s:y']) - Number(inPorts_1[0][1]['s:y']);
-            var startY_2 = Number(inPorts_1[0][1]['s:y']);
+            var inPorts_2 = Skin_1.default.getPortsWithPrefix(template, 'in');
+            var gap_2 = Number(inPorts_2[1][1]['s:y']) - Number(inPorts_2[0][1]['s:y']);
+            var startY_2 = Number(inPorts_2[0][1]['s:y']);
             tempclone.pop();
             tempclone.pop();
             this.inputPorts.forEach(function (port, i) {
-                var portClone = clone(inPorts_1[0]);
+                var portClone = clone(inPorts_2[0]);
                 portClone[portClone.length - 1][2] = port.Key;
-                portClone[1].transform = 'translate(' + inPorts_1[1][1]['s:x'] + ','
+                portClone[1].transform = 'translate(' + inPorts_2[1][1]['s:x'] + ','
                     + (startY_2 + i * gap_2) + ')';
                 tempclone.push(portClone);
             });
         }
         else if (template[1]['s:type'] === 'generic') {
             setGenericSize(tempclone, Number(this.getGenericHeight()));
-            var inPorts_2 = Skin_1.default.getPortsWithPrefix(template, 'in');
-            var ingap_1 = Number(inPorts_2[1][1]['s:y']) - Number(inPorts_2[0][1]['s:y']);
-            var instartY_1 = Number(inPorts_2[0][1]['s:y']);
+            var inPorts_3 = Skin_1.default.getPortsWithPrefix(template, 'in');
+            var ingap_1 = Number(inPorts_3[1][1]['s:y']) - Number(inPorts_3[0][1]['s:y']);
+            var instartY_1 = Number(inPorts_3[0][1]['s:y']);
             var outPorts_2 = Skin_1.default.getPortsWithPrefix(template, 'out');
             var outgap_1 = Number(outPorts_2[1][1]['s:y']) - Number(outPorts_2[0][1]['s:y']);
             var outstartY_1 = Number(outPorts_2[0][1]['s:y']);
@@ -315,9 +454,9 @@ var Cell = /** @class */ (function () {
             tempclone.pop();
             tempclone.pop();
             this.inputPorts.forEach(function (port, i) {
-                var portClone = clone(inPorts_2[0]);
+                var portClone = clone(inPorts_3[0]);
                 portClone[portClone.length - 1][2] = port.Key;
-                portClone[1].transform = 'translate(' + inPorts_2[1][1]['s:x'] + ','
+                portClone[1].transform = 'translate(' + inPorts_3[1][1]['s:x'] + ','
                     + (instartY_1 + i * ingap_1) + ')';
                 portClone[1].id = 'port_' + port.parentNode.Key + '~' + port.Key;
                 tempclone.push(portClone);
@@ -332,6 +471,40 @@ var Cell = /** @class */ (function () {
             });
             // first child of generic must be a text node.
             tempclone[2][2] = this.type;
+        }
+        else if (template[1]['s:type'] === 'sub_odd' || template[1]['s:type'] === 'sub_even') {
+            var subModule = drawModule_1.drawSubModule(cell, this.subModule);
+            tempclone[3][1].width = subModule[1].width;
+            tempclone[3][1].height = subModule[1].height;
+            tempclone[2][1].x = tempclone[3][1].width / 2;
+            tempclone[2][2] = this.type;
+            tempclone.pop();
+            tempclone.pop();
+            tempclone.pop();
+            tempclone.pop();
+            subModule.shift();
+            subModule.shift();
+            _.forEach(subModule, function (child) { return tempclone.push(child); });
+            var inPorts_4 = Skin_1.default.getPortsWithPrefix(template, 'in');
+            var outPorts_3 = Skin_1.default.getPortsWithPrefix(template, 'out');
+            this.inputPorts.forEach(function (port, i) {
+                var portElk = _.find(cell.ports, function (p) { return p.id === cell.id + '.' + port.Key; });
+                var portClone = clone(inPorts_4[0]);
+                portClone[portClone.length - 1][2] = port.Key;
+                portClone[1].transform = 'translate(' + portElk.x + ','
+                    + portElk.y + ')';
+                portClone[1].id = 'port_' + port.parentNode.Key + '~' + port.Key;
+                tempclone.push(portClone);
+            });
+            this.outputPorts.forEach(function (port, i) {
+                var portElk = _.find(cell.ports, function (p) { return p.id === cell.id + '.' + port.Key; });
+                var portClone = clone(outPorts_3[0]);
+                portClone[portClone.length - 1][2] = port.Key;
+                portClone[1].transform = 'translate(' + portElk.x + ','
+                    + portElk.y + ')';
+                portClone[1].id = 'port_' + port.parentNode.Key + '~' + port.Key;
+                tempclone.push(portClone);
+            });
         }
         setClass(tempclone, '$cell_id', 'cell_' + this.key);
         return tempclone;
@@ -430,7 +603,7 @@ function getBits(signals, indicesString) {
     }
 }
 
-},{"./FlatModule":2,"./Port":3,"./Skin":4,"./YosysModel":5,"clone":76,"lodash":83,"onml":85}],2:[function(require,module,exports){
+},{"./FlatModule":2,"./Port":3,"./Skin":4,"./YosysModel":5,"./drawModule":6,"./elkGraph":7,"clone":76,"lodash":83,"onml":85}],2:[function(require,module,exports){
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.removeDups = exports.addToDefaultDict = exports.arrayToBitstring = exports.FlatModule = void 0;
@@ -438,25 +611,89 @@ var Skin_1 = require("./Skin");
 var Cell_1 = require("./Cell");
 var _ = require("lodash");
 var FlatModule = /** @class */ (function () {
-    function FlatModule(netlist) {
+    function FlatModule(mod, name, depth, parent) {
         var _this = this;
-        this.moduleName = null;
-        _.forEach(netlist.modules, function (mod, name) {
-            if (mod.attributes && Number(mod.attributes.top) === 1) {
-                _this.moduleName = name;
+        if (parent === void 0) { parent = null; }
+        this.parent = parent;
+        this.moduleName = name;
+        var ports = _.map(mod.ports, function (port, portName) { return Cell_1.default.fromPort(port, portName, _this.moduleName); });
+        var cells = _.map(mod.cells, function (c, key) {
+            switch (FlatModule.config.hierarchy.enable) {
+                case 'level': {
+                    if (FlatModule.config.hierarchy.expandLevel > depth) {
+                        if (_.includes(FlatModule.modNames, c.type)) {
+                            return Cell_1.default.createSubModule(c, key, _this.moduleName, FlatModule.netlist.modules[c.type], depth);
+                        }
+                        else {
+                            return Cell_1.default.fromYosysCell(c, key, _this.moduleName);
+                        }
+                    }
+                    else {
+                        return Cell_1.default.fromYosysCell(c, key, _this.moduleName);
+                    }
+                }
+                case 'all': {
+                    if (_.includes(FlatModule.modNames, c.type)) {
+                        return Cell_1.default.createSubModule(c, key, _this.moduleName, FlatModule.netlist.modules[c.type], depth);
+                    }
+                    else {
+                        return Cell_1.default.fromYosysCell(c, key, _this.moduleName);
+                    }
+                }
+                case 'modules': {
+                    if (_.includes(FlatModule.config.hierarchy.expandModules.types, c.type) ||
+                        _.includes(FlatModule.config.hierarchy.expandModules.ids, key)) {
+                        if (!_.includes(FlatModule.modNames, c.type)) {
+                            throw new Error('Submodule in config file not defined in input json file.');
+                        }
+                        return Cell_1.default.createSubModule(c, key, _this.moduleName, FlatModule.netlist.modules[c.type], depth);
+                    }
+                    else {
+                        return Cell_1.default.fromYosysCell(c, key, _this.moduleName);
+                    }
+                }
+                default: {
+                    return Cell_1.default.fromYosysCell(c, key, _this.moduleName);
+                }
             }
         });
-        // Otherwise default the first one in the file...
-        if (this.moduleName == null) {
-            this.moduleName = Object.keys(netlist.modules)[0];
-        }
-        var top = netlist.modules[this.moduleName];
-        var ports = _.map(top.ports, Cell_1.default.fromPort);
-        var cells = _.map(top.cells, function (c, key) { return Cell_1.default.fromYosysCell(c, key); });
         this.nodes = cells.concat(ports);
-        // populated by createWires
-        this.wires = [];
+        // this can be skipped if there are no 0's or 1's
+        if (FlatModule.layoutProps.constants !== false) {
+            this.addConstants();
+        }
+        // this can be skipped if there are no splits or joins
+        if (FlatModule.layoutProps.splitsAndJoins !== false) {
+            this.addSplitsJoins();
+        }
+        this.createWires();
     }
+    FlatModule.fromNetlist = function (netlist, config) {
+        this.layoutProps = Skin_1.default.getProperties();
+        this.modNames = Object.keys(netlist.modules);
+        this.netlist = netlist;
+        this.config = config;
+        var topName = null;
+        if (this.config.top.enable) {
+            topName = this.config.top.module;
+            if (!_.includes(this.modNames, topName)) {
+                throw new Error('Top module in config file not defined in input json file.');
+            }
+        }
+        else {
+            _.forEach(netlist.modules, function (mod, name) {
+                if (mod.attributes && Number(mod.attributes.top) === 1) {
+                    topName = name;
+                }
+            });
+            // Otherwise default the first one in the file...
+            if (topName == null) {
+                topName = this.modNames[0];
+            }
+        }
+        var top = netlist.modules[topName];
+        return new FlatModule(top, topName, 0);
+    };
     // converts input ports with constant assignments to constant nodes
     FlatModule.prototype.addConstants = function () {
         // find the maximum signal number
@@ -471,6 +708,7 @@ var FlatModule = /** @class */ (function () {
     };
     // solves for minimal bus splits and joins and adds them to module
     FlatModule.prototype.addSplitsJoins = function () {
+        var _this = this;
         var allInputs = _.flatMap(this.nodes, function (n) { return n.inputPortVals(); });
         var allOutputs = _.flatMap(this.nodes, function (n) { return n.outputPortVals(); });
         var allInputsCopy = allInputs.slice();
@@ -480,19 +718,18 @@ var FlatModule = /** @class */ (function () {
             gather(allOutputs, allInputsCopy, input, 0, input.length, splits, joins);
         });
         this.nodes = this.nodes.concat(_.map(joins, function (joinOutput, joinInputs) {
-            return Cell_1.default.fromJoinInfo(joinInputs, joinOutput);
+            return Cell_1.default.fromJoinInfo(joinInputs, joinOutput, _this.moduleName);
         })).concat(_.map(splits, function (splitOutputs, splitInput) {
-            return Cell_1.default.fromSplitInfo(splitInput, splitOutputs);
+            return Cell_1.default.fromSplitInfo(splitInput, splitOutputs, _this.moduleName);
         }));
     };
     // search through all the ports to find all of the wires
     FlatModule.prototype.createWires = function () {
-        var layoutProps = Skin_1.default.getProperties();
         var ridersByNet = {};
         var driversByNet = {};
         var lateralsByNet = {};
         this.nodes.forEach(function (n) {
-            n.collectPortsByDirection(ridersByNet, driversByNet, lateralsByNet, layoutProps.genericsLaterals);
+            n.collectPortsByDirection(ridersByNet, driversByNet, lateralsByNet, FlatModule.layoutProps.genericsLaterals);
         });
         // list of unique nets
         var nets = removeDups(_.keys(ridersByNet).concat(_.keys(driversByNet)).concat(_.keys(lateralsByNet)));
@@ -648,14 +885,14 @@ var Port = /** @class */ (function () {
     Port.prototype.valString = function () {
         return ',' + this.value.join() + ',';
     };
-    Port.prototype.findConstants = function (sigsByConstantName, maxNum, constantCollector) {
+    Port.prototype.findConstants = function (sigsByConstantName, maxNum, constantCollector, parent) {
         var _this = this;
         var constNameCollector = '';
         var constNumCollector = [];
         var portSigs = this.value;
         portSigs.forEach(function (portSig, portSigIndex) {
             // is constant?
-            if (portSig === '0' || portSig === '1') {
+            if (portSig === '0' || portSig === '1' || portSig === 'x') {
                 maxNum += 1;
                 constNameCollector += portSig;
                 // replace the constant with new signal num
@@ -664,19 +901,19 @@ var Port = /** @class */ (function () {
                 // string of constants ended before end of p.value
             }
             else if (constNumCollector.length > 0) {
-                _this.assignConstant(constNameCollector, constNumCollector, portSigIndex, sigsByConstantName, constantCollector);
+                _this.assignConstant(constNameCollector, constNumCollector, portSigIndex, sigsByConstantName, constantCollector, parent);
                 // reset name and num collectors
                 constNameCollector = '';
                 constNumCollector = [];
             }
         });
         if (constNumCollector.length > 0) {
-            this.assignConstant(constNameCollector, constNumCollector, portSigs.length, sigsByConstantName, constantCollector);
+            this.assignConstant(constNameCollector, constNumCollector, portSigs.length, sigsByConstantName, constantCollector, parent);
         }
         return maxNum;
     };
     Port.prototype.getGenericElkPort = function (index, templatePorts, dir) {
-        var nkey = this.parentNode.Key;
+        var nkey = this.parentNode.parent + '.' + this.parentNode.Key;
         var type = this.parentNode.getTemplate()[1]['s:type'];
         if (index === 0) {
             var ret = {
@@ -686,7 +923,7 @@ var Port = /** @class */ (function () {
                 x: Number(templatePorts[0][1]['s:x']),
                 y: Number(templatePorts[0][1]['s:y']),
             };
-            if ((type === 'generic' || type === 'join') && dir === 'in') {
+            if ((type === 'generic' || type === 'sub_even' || type === 'sub_odd' || type === 'join') && dir === 'in') {
                 ret.labels = [{
                         id: nkey + '.' + this.key + '.label',
                         text: this.key,
@@ -695,8 +932,12 @@ var Port = /** @class */ (function () {
                         width: (6 * this.key.length),
                         height: 11,
                     }];
+                if (type === 'sub_even' || type === 'sub_odd') {
+                    ret.layoutOptions = { 'org.eclipse.elk.port.side': 'WEST' };
+                }
             }
-            if ((type === 'generic' || type === 'split') && dir === 'out') {
+            if ((type === 'generic' || type === 'sub_even' || type === 'sub_odd' || type === 'split')
+                && dir === 'out') {
                 ret.labels = [{
                         id: nkey + '.' + this.key + '.label',
                         text: this.key,
@@ -705,6 +946,13 @@ var Port = /** @class */ (function () {
                         width: (6 * this.key.length),
                         height: 11,
                     }];
+                if (type === 'sub_even' || type === 'sub_odd') {
+                    ret.layoutOptions = { 'org.eclipse.elk.port.side': 'EAST' };
+                }
+            }
+            if (type === 'sub_even' || type === 'sub_odd') {
+                delete ret.x;
+                delete ret.y;
             }
             return ret;
         }
@@ -717,7 +965,7 @@ var Port = /** @class */ (function () {
                 x: Number(templatePorts[0][1]['s:x']),
                 y: (index) * gap + Number(templatePorts[0][1]['s:y']),
             };
-            if (type === 'generic') {
+            if (type === 'generic' || type === 'sub_even' || type === 'sub_odd') {
                 ret.labels = [{
                         id: nkey + '.' + this.key + '.label',
                         text: this.key,
@@ -726,11 +974,21 @@ var Port = /** @class */ (function () {
                         width: (6 * this.key.length),
                         height: 11,
                     }];
+                if (dir === 'in') {
+                    ret.layoutOptions = { 'org.eclipse.elk.port.side': 'WEST' };
+                }
+                if (dir === 'out') {
+                    ret.layoutOptions = { 'org.eclipse.elk.port.side': 'EAST' };
+                }
+            }
+            if (type === 'sub_even' || type === 'sub_odd') {
+                delete ret.x;
+                delete ret.y;
             }
             return ret;
         }
     };
-    Port.prototype.assignConstant = function (nameCollector, constants, currIndex, signalsByConstantName, constantCollector) {
+    Port.prototype.assignConstant = function (nameCollector, constants, currIndex, signalsByConstantName, constantCollector, parent) {
         var _this = this;
         // we've been appending to nameCollector, so reverse to get const name
         var constName = nameCollector.split('').reverse().join('');
@@ -746,7 +1004,7 @@ var Port = /** @class */ (function () {
             });
         }
         else {
-            constantCollector.push(Cell_1.default.fromConstantInfo(constName, constants));
+            constantCollector.push(Cell_1.default.fromConstantInfo(constName, constants, parent));
             signalsByConstantName[constName] = constants;
         }
     };
@@ -821,7 +1079,8 @@ var Skin;
         });
     }
     Skin.getLateralPortPids = getLateralPortPids;
-    function findSkinType(type) {
+    function findSkinType(type, depth) {
+        if (depth === void 0) { depth = null; }
         var ret = null;
         onml.traverse(Skin.skin, {
             enter: function (node, parent) {
@@ -831,13 +1090,25 @@ var Skin;
             },
         });
         if (ret == null) {
-            onml.traverse(Skin.skin, {
-                enter: function (node) {
-                    if (node.attr['s:type'] === 'generic') {
-                        ret = node;
-                    }
-                },
-            });
+            if (depth == null) {
+                onml.traverse(Skin.skin, {
+                    enter: function (node) {
+                        if (node.attr['s:type'] === 'generic') {
+                            ret = node;
+                        }
+                    },
+                });
+            }
+            else {
+                var sub_1 = ['sub_odd', 'sub_even'];
+                onml.traverse(Skin.skin, {
+                    enter: function (node) {
+                        if (node.attr['s:type'] === sub_1[depth % 2]) {
+                            ret = node;
+                        }
+                    },
+                });
+            }
         }
         return ret.full;
     }
@@ -938,7 +1209,7 @@ var __spreadArrays = (this && this.__spreadArrays) || function () {
     return r;
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.removeDummyEdges = void 0;
+exports.removeDummyEdges = exports.drawSubModule = void 0;
 var elkGraph_1 = require("./elkGraph");
 var Skin_1 = require("./Skin");
 var _ = require("lodash");
@@ -952,7 +1223,7 @@ var WireDirection;
 })(WireDirection || (WireDirection = {}));
 function drawModule(g, module) {
     var nodes = module.nodes.map(function (n) {
-        var kchild = _.find(g.children, function (c) { return c.id === n.Key; });
+        var kchild = _.find(g.children, function (c) { return c.id === n.parent + '.' + n.Key; });
         return n.render(kchild);
     });
     removeDummyEdges(g);
@@ -1058,6 +1329,62 @@ function drawModule(g, module) {
     return onml.s(ret);
 }
 exports.default = drawModule;
+function drawSubModule(c, subModule) {
+    var nodes = [];
+    _.forEach(subModule.nodes, function (n) {
+        var kchild = _.find(c.children, function (child) { return child.id === n.parent + '.' + n.Key; });
+        if (kchild) {
+            nodes.push(n.render(kchild));
+        }
+    });
+    removeDummyEdges(c);
+    var lines = _.flatMap(c.edges, function (e) {
+        var netId = elkGraph_1.ElkModel.wireNameLookup[e.id];
+        var netName = 'net_' + netId.slice(1, netId.length - 1);
+        return _.flatMap(e.sections, function (s) {
+            var startPoint = s.startPoint;
+            s.bendPoints = s.bendPoints || [];
+            var bends = s.bendPoints.map(function (b) {
+                var l = ['line', {
+                        x1: startPoint.x,
+                        x2: b.x,
+                        y1: startPoint.y,
+                        y2: b.y,
+                        class: netName,
+                    }];
+                startPoint = b;
+                return l;
+            });
+            if (e.junctionPoints) {
+                var circles = e.junctionPoints.map(function (j) {
+                    return ['circle', {
+                            cx: j.x,
+                            cy: j.y,
+                            r: 2,
+                            style: 'fill:#000',
+                            class: netName,
+                        }];
+                });
+                bends = bends.concat(circles);
+            }
+            var line = [['line', {
+                        x1: startPoint.x,
+                        x2: s.endPoint.x,
+                        y1: startPoint.y,
+                        y2: s.endPoint.y,
+                        class: netName,
+                    }]];
+            return bends.concat(line);
+        });
+    });
+    var svgAttrs = Skin_1.default.skin[1];
+    svgAttrs.width = c.width.toString();
+    svgAttrs.height = c.height.toString();
+    var elements = __spreadArrays(nodes, lines);
+    var ret = __spreadArrays(['svg', svgAttrs], elements);
+    return ret;
+}
+exports.drawSubModule = drawSubModule;
 function which_dir(start, end) {
     if (end.x === start.x && end.y === start.y) {
         throw new Error('start and end are the same');
@@ -1205,29 +1532,29 @@ function buildElkGraph(module) {
         // at least one driver and at least one rider and no laterals
         if (w.drivers.length > 0 && w.riders.length > 0 && w.laterals.length === 0) {
             var ret = [];
-            route(w.drivers, w.riders, ret, numWires);
+            route(w.drivers, w.riders, ret, module.moduleName, numWires);
             return ret;
             // at least one driver or rider and at least one lateral
         }
         else if (w.drivers.concat(w.riders).length > 0 && w.laterals.length > 0) {
             var ret = [];
-            route(w.drivers, w.laterals, ret, numWires);
-            route(w.laterals, w.riders, ret, numWires);
+            route(w.drivers, w.laterals, ret, module.moduleName, numWires);
+            route(w.laterals, w.riders, ret, module.moduleName, numWires);
             return ret;
             // at least two drivers and no riders
         }
         else if (w.riders.length === 0 && w.drivers.length > 1) {
             // create a dummy node and add it to children
-            var dummyId_1 = addDummy(children);
+            var dummyId_1 = addDummy(children, module.moduleName);
             ElkModel.dummyNum += 1;
             var dummyEdges = w.drivers.map(function (driver) {
                 var sourceParentKey = driver.parentNode.Key;
-                var id = 'e' + String(ElkModel.edgeIndex);
+                var id = module.moduleName + '.e' + String(ElkModel.edgeIndex);
                 ElkModel.edgeIndex += 1;
                 var d = {
                     id: id,
-                    source: sourceParentKey,
-                    sourcePort: sourceParentKey + '.' + driver.key,
+                    source: module.moduleName + '.' + sourceParentKey,
+                    sourcePort: module.moduleName + '.' + sourceParentKey + '.' + driver.key,
                     target: dummyId_1,
                     targetPort: dummyId_1 + '.p',
                 };
@@ -1239,18 +1566,18 @@ function buildElkGraph(module) {
         }
         else if (w.riders.length > 1 && w.drivers.length === 0) {
             // create a dummy node and add it to children
-            var dummyId_2 = addDummy(children);
+            var dummyId_2 = addDummy(children, module.moduleName);
             ElkModel.dummyNum += 1;
             var dummyEdges = w.riders.map(function (rider) {
                 var sourceParentKey = rider.parentNode.Key;
-                var id = 'e' + String(ElkModel.edgeIndex);
+                var id = module.moduleName + '.e' + String(ElkModel.edgeIndex);
                 ElkModel.edgeIndex += 1;
                 var edge = {
                     id: id,
                     source: dummyId_2,
                     sourcePort: dummyId_2 + '.p',
-                    target: sourceParentKey,
-                    targetPort: sourceParentKey + '.' + rider.key,
+                    target: module.moduleName + '.' + sourceParentKey,
+                    targetPort: module.moduleName + '.' + sourceParentKey + '.' + rider.key,
                 };
                 ElkModel.wireNameLookup[id] = rider.wire.netName;
                 return edge;
@@ -1262,14 +1589,14 @@ function buildElkGraph(module) {
             var sourceParentKey_1 = source_1.parentNode.Key;
             var lateralEdges = w.laterals.slice(1).map(function (lateral) {
                 var lateralParentKey = lateral.parentNode.Key;
-                var id = 'e' + String(ElkModel.edgeIndex);
+                var id = module.moduleName + '.e' + String(ElkModel.edgeIndex);
                 ElkModel.edgeIndex += 1;
                 var edge = {
                     id: id,
-                    source: sourceParentKey_1,
-                    sourcePort: sourceParentKey_1 + '.' + source_1.key,
-                    target: lateralParentKey,
-                    targetPort: lateralParentKey + '.' + lateral.key,
+                    source: module.moduleName + '.' + sourceParentKey_1,
+                    sourcePort: module.moduleName + '.' + sourceParentKey_1 + '.' + source_1.key,
+                    target: module.moduleName + '.' + lateralParentKey,
+                    targetPort: module.moduleName + '.' + lateralParentKey + '.' + lateral.key,
                 };
                 ElkModel.wireNameLookup[id] = lateral.wire.netName;
                 return edge;
@@ -1286,8 +1613,8 @@ function buildElkGraph(module) {
     };
 }
 exports.buildElkGraph = buildElkGraph;
-function addDummy(children) {
-    var dummyId = '$d_' + String(ElkModel.dummyNum);
+function addDummy(children, moduleName) {
+    var dummyId = moduleName + '.$d_' + String(ElkModel.dummyNum);
     var child = {
         id: dummyId,
         width: 0,
@@ -1302,10 +1629,10 @@ function addDummy(children) {
     children.push(child);
     return dummyId;
 }
-function route(sourcePorts, targetPorts, edges, numWires) {
+function route(sourcePorts, targetPorts, edges, moduleName, numWires) {
     var newEdges = (_.flatMap(sourcePorts, function (sourcePort) {
         var sourceParentKey = sourcePort.parentNode.key;
-        var sourceKey = sourceParentKey + '.' + sourcePort.key;
+        var sourceKey = moduleName + '.' + sourceParentKey + '.' + sourcePort.key;
         var edgeLabel;
         if (numWires > 1) {
             edgeLabel = [{
@@ -1322,13 +1649,15 @@ function route(sourcePorts, targetPorts, edges, numWires) {
         }
         return targetPorts.map(function (targetPort) {
             var targetParentKey = targetPort.parentNode.key;
-            var targetKey = targetParentKey + '.' + targetPort.key;
-            var id = 'e' + ElkModel.edgeIndex;
+            var targetKey = moduleName + '.' + targetParentKey + '.' + targetPort.key;
+            var id = moduleName + '.e' + ElkModel.edgeIndex;
             var edge = {
                 id: id,
                 labels: edgeLabel,
-                sources: [sourceKey],
-                targets: [targetKey],
+                source: moduleName + '.' + sourceParentKey,
+                sourcePort: sourceKey,
+                target: moduleName + '.' + targetParentKey,
+                targetPort: targetKey,
             };
             ElkModel.wireNameLookup[id] = targetPort.wire.netName;
             if (sourcePort.parentNode.type !== '$dff') {
@@ -1349,7 +1678,7 @@ function route(sourcePorts, targetPorts, edges, numWires) {
 (function (global){(function (){
 'use strict';
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.render = exports.dumpLayout = void 0;
+exports.render = void 0;
 var ELK = (typeof window !== "undefined" ? window['ELK'] : typeof global !== "undefined" ? global['ELK'] : null);
 var onml = require("onml");
 var FlatModule_1 = require("./FlatModule");
@@ -1357,41 +1686,11 @@ var Skin_1 = require("./Skin");
 var elkGraph_1 = require("./elkGraph");
 var drawModule_1 = require("./drawModule");
 var elk = new ELK();
-function createFlatModule(skinData, yosysNetlist) {
-    Skin_1.default.skin = onml.p(skinData);
-    var layoutProps = Skin_1.default.getProperties();
-    var flatModule = new FlatModule_1.FlatModule(yosysNetlist);
-    // this can be skipped if there are no 0's or 1's
-    if (layoutProps.constants !== false) {
-        flatModule.addConstants();
-    }
-    // this can be skipped if there are no splits or joins
-    if (layoutProps.splitsAndJoins !== false) {
-        flatModule.addSplitsJoins();
-    }
-    flatModule.createWires();
-    return flatModule;
-}
-function dumpLayout(skinData, yosysNetlist, prelayout, done) {
-    var flatModule = createFlatModule(skinData, yosysNetlist);
+function render(skinData, yosysNetlist, done, elkData, configData) {
+    var skin = onml.p(skinData);
+    Skin_1.default.skin = skin;
+    var flatModule = FlatModule_1.FlatModule.fromNetlist(yosysNetlist, configData);
     var kgraph = elkGraph_1.buildElkGraph(flatModule);
-    if (prelayout) {
-        done(null, JSON.stringify(kgraph, null, 2));
-        return;
-    }
-    var layoutProps = Skin_1.default.getProperties();
-    var promise = elk.layout(kgraph, { layoutOptions: layoutProps.layoutEngine });
-    promise.then(function (graph) {
-        done(null, JSON.stringify(graph, null, 2));
-    }).catch(function (reason) {
-        throw Error(reason);
-    });
-}
-exports.dumpLayout = dumpLayout;
-function render(skinData, yosysNetlist, done, elkData) {
-    var flatModule = createFlatModule(skinData, yosysNetlist);
-    var kgraph = elkGraph_1.buildElkGraph(flatModule);
-    var layoutProps = Skin_1.default.getProperties();
     var promise;
     // if we already have a layout then use it
     if (elkData) {
@@ -1402,7 +1701,7 @@ function render(skinData, yosysNetlist, done, elkData) {
     }
     else {
         // otherwise use ELK to generate the layout
-        promise = elk.layout(kgraph, { layoutOptions: layoutProps.layoutEngine })
+        promise = elk.layout(kgraph, { layoutOptions: FlatModule_1.FlatModule.layoutProps.layoutEngine })
             .then(function (g) { return drawModule_1.default(g, flatModule); })
             // tslint:disable-next-line:no-console
             .catch(function (e) { console.error(e); });
@@ -1430,9 +1729,9 @@ const Ajv = require('ajv');
 var ajv = new Ajv({allErrors: true});
 require('ajv-errors')(ajv);
 
-const digital = "<svg  xmlns=\"http://www.w3.org/2000/svg\"\n  xmlns:xlink=\"http://www.w3.org/1999/xlink\"\n  xmlns:s=\"https://github.com/nturley/netlistsvg\"\n  width=\"800\" height=\"300\">\n  <s:properties>\n    <s:layoutEngine\n      org.eclipse.elk.layered.spacing.nodeNodeBetweenLayers=\"35\"\n      org.eclipse.elk.spacing.nodeNode= \"35\"\n      org.eclipse.elk.layered.layering.strategy= \"LONGEST_PATH\"\n    />\n    <s:low_priority_alias val=\"$dff\" />\n  </s:properties>\n<style>\nsvg {\n  stroke:#000;\n  fill:none;\n}\ntext {\n  fill:#000;\n  stroke:none;\n  font-size:10px;\n  font-weight: bold;\n  font-family: \"Courier New\", monospace;\n}\nline {\n    stroke-linecap: round;\n}\n.nodelabel {\n  text-anchor: middle;\n}\n.inputPortLabel {\n  text-anchor: end;\n}\n.splitjoinBody {\n  fill:#000;\n}\n</style>\n  <g s:type=\"mux\" transform=\"translate(50, 50)\" s:width=\"20\" s:height=\"40\">\n    <s:alias val=\"$pmux\"/>\n    <s:alias val=\"$mux\"/>\n    <s:alias val=\"$_MUX_\"/>\n\n    <path d=\"M0,0 L20,10 L20,30 L0,40 Z\" class=\"$cell_id\"/>\n\n    <text x=\"5\" y=\"32\" class=\"nodelabel $cell_id\" s:attribute=\"\">1</text>\n    <text x=\"5\" y=\"13\" class=\"nodelabel $cell_id\" s:attribute=\"\">0</text>\n    <g s:x=\"0\" s:y=\"10\" s:pid=\"A\"/>\n    <g s:x=\"0\" s:y=\"30\" s:pid=\"B\"/>\n    <g s:x=\"10\" s:y=\"35\" s:pid=\"S\"/>\n    <g s:x=\"20\" s:y=\"20\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"mux-bus\" transform=\"translate(100, 50)\" s:width=\"24\" s:height=\"40\">\n    <s:alias val=\"$pmux-bus\"/>\n    <s:alias val=\"$mux-bus\"/>\n    <s:alias val=\"$_MUX_-bus\"/>\n\n    <path d=\"M0,0 L20,10 L20,30 L0,40 Z\" class=\"$cell_id\"/>\n    <path d=\"M4,2 L4,0 L22,9 L22,31 L4,40 L4,38\" class=\"$cell_id\"/>\n    <path d=\"M8,2 L8,0 L24,8 L24,32 L8,40 L8,38\" class=\"$cell_id\"/>\n\n    <text x=\"5\" y=\"32\" class=\"nodelabel $cell_id\" s:attribute=\"\">1</text>\n    <text x=\"5\" y=\"13\" class=\"nodelabel $cell_id\" s:attribute=\"\">0</text>\n    <g s:x=\"-1\" s:y=\"10\" s:pid=\"A\"/>\n    <g s:x=\"-1\" s:y=\"30\" s:pid=\"B\"/>\n    <g s:x=\"12\" s:y=\"38\" s:pid=\"S\"/>\n    <g s:x=\"24.5\" s:y=\"20\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"tribuf\" transform=\"translate(450, 50)\" s:width=\"15\" s:height=\"30\">\n    <s:alias val=\"$tribuf\"/>\n    <s:alias val=\"$_TRIBUF_\"/>\n\n    <s:alias val=\"tribuf-bus\"/>\n    <s:alias val=\"$tribuf-bus\"/>\n    <s:alias val=\"$_TRIBUF_-bus\"/>\n\n    <path d=\"M0,0 L25,15 L0,30 Z\" class=\"$cell_id\"/>\n\n    <g s:x=\"0\" s:y=\"15\" s:pid=\"A\"/>\n    <g s:x=\"11\" s:y=\"6\" s:pid=\"EN\"/>\n    <g s:x=\"25\" s:y=\"15\" s:pid=\"Y\"/>\n  </g>\n\n  <!-- and -->\n  <g s:type=\"and\" transform=\"translate(150,50)\" s:width=\"30\" s:height=\"25\">\n    <s:alias val=\"$and\"/>\n    <s:alias val=\"$logic_and\"/>\n    <s:alias val=\"$_AND_\"/>\n\n    <path d=\"M0,0 L0,25 L15,25 A15 12.5 0 0 0 15,0 Z\" class=\"$cell_id\"/>\n\n    <g s:x=\"0\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"0\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"30\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n  <g s:type=\"nand\" transform=\"translate(150,100)\" s:width=\"30\" s:height=\"25\">\n    <s:alias val=\"$nand\"/>\n    <s:alias val=\"$logic_nand\"/>\n    <s:alias val=\"$_NAND_\"/>\n    <s:alias val=\"$_ANDNOT_\"/>\n\n    <path d=\"M0,0 L0,25 L15,25 A15 12.5 0 0 0 15,0 Z\" class=\"$cell_id\"/>\n    <circle cx=\"34\" cy=\"12.5\" r=\"3\" class=\"$cell_id\"/>\n\n    <g s:x=\"0\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"0\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"36\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n\n  <!-- or -->\n  <g s:type=\"or\" transform=\"translate(250,50)\" s:width=\"30\" s:height=\"25\">\n    <s:alias val=\"$or\"/>\n    <s:alias val=\"$logic_or\"/>\n    <s:alias val=\"$_OR_\"/>\n\n    <path d=\"M0,25 L0,25 L15,25 A15 12.5 0 0 0 15,0 L0,0\" class=\"$cell_id\"/>\n    <path d=\"M0,0 A30 25 0 0 1 0,25\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"30\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n  <g s:type=\"reduce_nor\" transform=\"translate(250, 100)\" s:width=\"33\" s:height=\"25\">\n    <s:alias val=\"$nor\"/>\n    <s:alias val=\"$reduce_nor\"/>\n    <s:alias val=\"$_NOR_\"/>\n    <s:alias val=\"$_ORNOT_\"/>\n\n    <path d=\"M0,25 L0,25 L15,25 A15 12.5 0 0 0 15,0 L0,0\" class=\"$cell_id\"/>\n    <path d=\"M0,0 A30 25 0 0 1 0,25\" class=\"$cell_id\"/>\n    <circle cx=\"34\" cy=\"12.5\" r=\"3\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"36\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n\n  <!--xor -->\n  <g s:type=\"reduce_xor\" transform=\"translate(350, 50)\" s:width=\"33\" s:height=\"25\">\n    <s:alias val=\"$xor\"/>\n    <s:alias val=\"$reduce_xor\"/>\n    <s:alias val=\"$_XOR_\"/>\n\n    <path d=\"M3,0 A30 25 0 0 1 3,25 A30 25 0 0 0 33,12.5 A30 25 0 0 0 3,0\" class=\"$cell_id\"/>\n    <path d=\"M0,0 A30 25 0 0 1 0,25\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"33\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n  <g s:type=\"reduce_nxor\" transform=\"translate(350, 100)\" s:width=\"33\" s:height=\"25\">\n    <s:alias val=\"$xnor\"/>\n    <s:alias val=\"$reduce_xnor\"/>\n    <s:alias val=\"$_XNOR_\"/>\n\n    <path d=\"M3,0 A30 25 0 0 1 3,25 A30 25 0 0 0 33,12.5 A30 25 0 0 0 3,0\" class=\"$cell_id\"/>\n    <path d=\"M0,0 A30 25 0 0 1 0,25\" class=\"$cell_id\"/>\n    <circle cx=\"36\" cy=\"12.5\" r=\"3\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"38\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n\n  <!--buffer -->\n  <g s:type=\"not\" transform=\"translate(450,100)\" s:width=\"30\" s:height=\"20\">\n    <s:alias val=\"$_NOT_\"/>\n    <s:alias val=\"$not\"/>\n    <s:alias val=\"$logic_not\"/>\n\n    <path d=\"M0,0 L0,20 L20,10 Z\" class=\"$cell_id\"/>\n    <circle cx=\"24\" cy=\"10\" r=\"3\" class=\"$cell_id\"/>\n\n    <g s:x=\"-1\" s:y=\"10\" s:pid=\"A\"/>\n    <g s:x=\"27\" s:y=\"10\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"add\" transform=\"translate(50, 150)\" s:width=\"25\" s:height=\"25\">\n    <s:alias val=\"$add\"/>\n\n    <circle r=\"12.5\" cx=\"12.5\" cy=\"12.5\" class=\"$cell_id\"/>\n    <line x1=\"7.5\" x2=\"17.5\" y1=\"12.5\" y2=\"12.5\" class=\"$cell_id\"/>\n    <line x1=\"12.5\" x2=\"12.5\" y1=\"7.5\" y2=\"17.5\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"26\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"sub\" transform=\"translate(150,150)\" s:width=\"25\" s:height=\"25\">\n    <s:alias val=\"$sub\"/>\n\n    <circle r=\"12.5\" cx=\"12.5\" cy=\"12.5\" class=\"$cell_id\"/>\n    <line x1=\"7.5\" x2=\"17.5\" y1=\"12.5\" y2=\"12.5\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"25\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n  <g s:type=\"eq\" transform=\"translate(250,150)\" s:width=\"25\" s:height=\"25\">\n    <s:alias val=\"$eq\"/>\n\n    <circle r=\"12.5\" cx=\"12.5\" cy=\"12.5\" class=\"$cell_id\"/>\n    <line x1=\"7.5\" x2=\"17.5\" y1=\"10\" y2=\"10\" class=\"$cell_id\"/>\n    <line x1=\"7.5\" x2=\"17.5\" y1=\"15\" y2=\"15\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"25\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"dff\" transform=\"translate(350,150)\" s:width=\"30\" s:height=\"40\">\n    <s:alias val=\"$dff\"/>\n    <s:alias val=\"$_DFF_\"/>\n    <s:alias val=\"$_DFF_P_\"/>\n\n    <s:alias val=\"dff-bus\"/>\n    <s:alias val=\"$dff-bus\"/>\n    <s:alias val=\"$_DFF_-bus\"/>\n    <s:alias val=\"$_DFF_P_-bus\"/>\n\n    <rect width=\"30\" height=\"40\" x=\"0\" y=\"0\" class=\"$cell_id\"/>\n    <path d=\"M0,35 L5,30 L0,25\" class=\"$cell_id\"/>\n\n    <g s:x=\"31\" s:y=\"10\" s:pid=\"Q\"/>\n    <g s:x=\"-1\" s:y=\"30\" s:pid=\"CLK\"/>\n    <g s:x=\"-1\" s:y=\"30\" s:pid=\"C\"/>\n    <g s:x=\"-1\" s:y=\"10\" s:pid=\"D\"/>\n  </g>\n\n  <g s:type=\"dffn\" transform=\"translate(450,150)\" s:width=\"30\" s:height=\"40\">\n    <s:alias val=\"$_DFF_N_\"/>\n\n    <s:alias val=\"dffn-bus\"/>\n    <s:alias val=\"$_DFF_N_-bus\"/>\n\n    <rect width=\"30\" height=\"40\" x=\"0\" y=\"0\" class=\"$cell_id\"/>\n    <path d=\"M0,35 L5,30 L0,25\" class=\"$cell_id\"/>\n    <circle cx=\"-3\" cy=\"30\" r=\"3\" class=\"$cell_id\"/>\n\n    <g s:x=\"30\" s:y=\"10\" s:pid=\"Q\"/>\n    <g s:x=\"-6\" s:y=\"30\" s:pid=\"CLK\"/>\n    <g s:x=\"-6\" s:y=\"30\" s:pid=\"C\"/>\n    <g s:x=\"0\" s:y=\"10\" s:pid=\"D\"/>\n  </g>\n\n  <g s:type=\"lt\" transform=\"translate(50,200)\" s:width=\"25\" s:height=\"25\">\n    <s:alias val=\"$lt\"/>\n\n    <circle r=\"12.5\" cx=\"12.5\" cy=\"12.5\" class=\"$cell_id\"/>\n    <line x1=\"6\" x2=\"17\" y1=\"12\"  y2=\"7\" class=\"$cell_id\"/>\n    <line x1=\"6\" x2=\"17\" y1=\"12\" y2=\"17\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"25\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"le\" transform=\"translate(150,200)\" s:width=\"25\" s:height=\"25\">\n    <s:alias val=\"$le\"/>\n\n    <circle r=\"12.5\" cx=\"12.5\" cy=\"12.5\" class=\"$cell_id\"/>\n    <line x1=\"6\" x2=\"17\" y1=\"11\"  y2=\"6\" class=\"$cell_id\"/>\n    <line x1=\"6\" x2=\"17\" y1=\"11\" y2=\"16\" class=\"$cell_id\"/>\n    <line x1=\"6\" x2=\"17\" y1=\"14\" y2=\"19\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"25\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"ge\" transform=\"translate(250,200)\" s:width=\"25\" s:height=\"25\">\n    <s:alias val=\"$ge\"/>\n\n    <circle r=\"12\" cx=\"12\" cy=\"12\" class=\"$cell_id\"/>\n    <line x1=\"8\" x2=\"19\"  y1=\"6\" y2=\"11\" class=\"$cell_id\"/>\n    <line x1=\"8\" x2=\"19\" y1=\"16\" y2=\"11\" class=\"$cell_id\"/>\n    <line x1=\"8\" x2=\"19\" y1=\"19\" y2=\"14\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"25\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"gt\" transform=\"translate(350,200)\" s:width=\"25\" s:height=\"25\">\n    <s:alias val=\"$gt\"/>\n\n    <circle r=\"12\" cx=\"12\" cy=\"12\" class=\"$cell_id\"/>\n    <line x1=\"8\" x2=\"19\"  y1=\"7\" y2=\"12\" class=\"$cell_id\"/>\n    <line x1=\"8\" x2=\"19\" y1=\"17\" y2=\"12\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"25\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"inputExt\" transform=\"translate(50,250)\" s:width=\"30\" s:height=\"20\">\n    <text x=\"15\" y=\"-4\" class=\"nodelabel $cell_id\" s:attribute=\"ref\">input</text>\n    <s:alias val=\"$_inputExt_\"/>\n    <path d=\"M0,0 L0,20 L15,20 L30,10 L15,0 Z\" class=\"$cell_id\"/>\n    <g s:x=\"30\" s:y=\"10\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"constant\" transform=\"translate(150,250)\" s:width=\"30\" s:height=\"20\">\n    <text x=\"15\" y=\"-4\" class=\"nodelabel $cell_id\" s:attribute=\"ref\">constant</text>\n\n    <s:alias val=\"$_constant_\"/>\n    <rect width=\"30\" height=\"20\" class=\"$cell_id\"/>\n\n    <g s:x=\"31\" s:y=\"10\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"outputExt\" transform=\"translate(250,250)\" s:width=\"30\" s:height=\"20\">\n    <text x=\"15\" y=\"-4\" class=\"nodelabel $cell_id\" s:attribute=\"ref\">output</text>\n    <s:alias val=\"$_outputExt_\"/>\n    <path d=\"M30,0 L30,20 L15,20 L0,10 L15,0 Z\" class=\"$cell_id\"/>\n\n    <g s:x=\"0\" s:y=\"10\" s:pid=\"A\"/>\n  </g>\n\n  <g s:type=\"split\" transform=\"translate(350,250)\" s:width=\"5\" s:height=\"40\">\n    <rect width=\"5\" height=\"40\" class=\"splitjoinBody\" s:generic=\"body\"/>\n    <s:alias val=\"$_split_\"/>\n\n    <g s:x=\"0\" s:y=\"20\" s:pid=\"in\"/>\n    <g transform=\"translate(5, 10)\" s:x=\"4\" s:y=\"10\" s:pid=\"out0\">\n      <text x=\"5\" y=\"-4\">hi:lo</text>\n    </g>\n    <g transform=\"translate(5, 30)\" s:x=\"4\" s:y=\"30\" s:pid=\"out1\">\n      <text x=\"5\" y=\"-4\">hi:lo</text>\n    </g>\n  </g>\n\n  <g s:type=\"join\" transform=\"translate(450,250)\" s:width=\"4\" s:height=\"40\">\n    <rect width=\"5\" height=\"40\" class=\"splitjoinBody\" s:generic=\"body\"/>\n    <s:alias val=\"$_join_\"/>\n    <g s:x=\"5\" s:y=\"20\"  s:pid=\"out\"/>\n    <g transform=\"translate(0, 10)\" s:x=\"0\" s:y=\"10\" s:pid=\"in0\">\n      <text x=\"-3\" y=\"-4\" class=\"inputPortLabel\">hi:lo</text>\n    </g>\n    <g transform=\"translate(0, 30)\" s:x=\"0\" s:y=\"30\" s:pid=\"in1\">\n      <text x=\"-3\" y=\"-4\" class=\"inputPortLabel\">hi:lo</text>\n    </g>\n  </g>\n\n  <g s:type=\"generic\" transform=\"translate(550,250)\" s:width=\"30\" s:height=\"40\">\n\n    <text x=\"15\" y=\"-4\" class=\"nodelabel $cell_id\" s:attribute=\"ref\">generic</text>\n    <rect width=\"30\" height=\"40\" s:generic=\"body\" class=\"$cell_id\"/>\n\n    <g transform=\"translate(30, 10)\" s:x=\"30\" s:y=\"10\" s:pid=\"out0\">\n      <text x=\"5\" y=\"-4\" style=\"fill:#000; stroke:none\" class=\"$cell_id\">out0</text>\n    </g>\n    <g transform=\"translate(30, 30)\" s:x=\"30\" s:y=\"30\" s:pid=\"out1\">\n      <text x=\"5\" y=\"-4\" style=\"fill:#000;stroke:none\" class=\"$cell_id\">out1</text>\n    </g>\n    <g transform=\"translate(0, 10)\" s:x=\"0\" s:y=\"10\" s:pid=\"in0\">\n      <text x=\"-3\" y=\"-4\" class=\"inputPortLabel $cell_id\">in0</text>\n    </g>\n    <g transform=\"translate(0, 30)\" s:x=\"0\" s:y=\"30\" s:pid=\"in1\">\n      <text x=\"-3\" y=\"-4\" class=\"inputPortLabel $cell_id\">in1</text>\n    </g>\n  </g>\n\n</svg>\n";
-const analog = "<svg xmlns=\"http://www.w3.org/2000/svg\"\n     xmlns:xlink=\"http://www.w3.org/1999/xlink\"\n     xmlns:s=\"https://github.com/nturley/netlistsvg\">\n  <s:properties\n    constants=\"false\"\n    splitsAndJoins=\"false\"\n    genericsLaterals=\"true\">\n    <s:layoutEngine\n        org.eclipse.elk.layered.spacing.nodeNodeBetweenLayers=\"5\"\n        org.eclipse.elk.layered.compaction.postCompaction.strategy=\"4\"\n        org.eclipse.elk.spacing.nodeNode= \"35\"\n        org.eclipse.elk.direction=\"DOWN\"/>\n  </s:properties>\n<style>\nsvg {\n  stroke: #000;\n  fill: none;\n}\ntext {\n  fill: #000;\n  stroke: none;\n  font-size: 10px;\n  font-weight: bold;\n  font-family: \"Courier New\", monospace;\n}\n.nodelabel {\n  text-anchor: middle;\n}\n.inputPortLabel {\n  text-anchor: end;\n}\n.splitjoinBody {\n  fill: #000;\n}\n.symbol {\n  stroke-linejoin: round;\n  stroke-linecap: round;\n  stroke-width: 2;\n}\n.detail {\n  stroke-linejoin: round;\n  stroke-linecap: round;\n  fill: #000;\n}\n</style>\n\n<!-- power -->\n<g s:type=\"vcc\" s:width=\"20\" s:height=\"30\" transform=\"translate(5,20)\">\n  <s:alias val=\"vcc\" />\n  <text x=\"10\" y=\"-4\" class=\"nodelabel $cell_id\" s:attribute=\"name\">name</text>\n  <path d=\"M0,0 H20 L10,15 Z M10,15 V30\" class=\"$cell_id\"/>\n  <g s:x=\"10\" s:y=\"30\" s:pid=\"A\" s:position=\"bottom\"/>\n</g>\n\n<g s:type=\"vee\" s:width=\"20\" s:height=\"30\" transform=\"translate(40,35)\">\n\t  <s:alias val=\"vee\" />\n\t  <text x=\"10\" y=\"10\" class=\"nodelabel $cell_id\" s:attribute=\"name\">name</text>\n\t  <path d=\"M0,0 H20 L10,-15 Z M10,-15 V-30\" class=\"$cell_id\"/>\n\t  <g s:x=\"10\" s:y=\"-30\" s:pid=\"A\" s:position=\"top\"/>\n\t</g>\n\n<g s:type=\"gnd\" s:width=\"20\" s:height=\"30\" transform=\"translate(80,35)\">\n  <s:alias val=\"gnd\"/>\n  <text x=\"30\" y=\"20\" class=\"nodelabel $cell_id\" s:attribute=\"name\">name</text>\n  <path d=\"M0,0 H20 M3,5 H17 M7,10 H13 M10,0 V-15\" class=\"$cell_id\"/>\n  <g s:x=\"10\" s:y=\"-15\" s:pid=\"A\" s:position=\"top\"/>\n</g>\n<!-- power -->\n\n<!-- signal -->\n<g s:type=\"inputExt\" s:width=\"30\" s:height=\"20\" transform=\"translate(5,70)\">\n  <text x=\"15\" y=\"-4\" class=\"$cell_id\" s:attribute=\"ref\">input</text>\n  <s:alias val=\"$_inputExt_\"/>\n  <path d=\"M0,0 V20 H15 L30,10 15,0 Z\" class=\"$cell_id\"/>\n  <g s:x=\"30\" s:y=\"10\" s:pid=\"Y\" s:position=\"right\"/>\n</g>\n\n<g s:type=\"outputExt\" s:width=\"30\" s:height=\"20\" transform=\"translate(60,70)\">\n  <text x=\"15\" y=\"-4\" class=\"$cell_id\" s:attribute=\"ref\">output</text>\n  <s:alias val=\"$_outputExt_\"/>\n  <path d=\"M30,0 V20 H15 L0,10 15,0 Z\" class=\"$cell_id\"/>\n  <g s:x=\"0\" s:y=\"10\" s:pid=\"A\" s:position=\"left\"/>\n</g>\n<!-- signal -->\n\n<!-- passives -->\n<g s:type=\"resistor_h\" s:width=\"50\" s:height=\"10\" transform=\"translate(5,110)\">\n  <s:alias val=\"r_h\"/>\n  <text class=\"nodelabel $cell_id\" x=\"25\" y=\"-5\" s:attribute=\"ref\">X1</text>\n  <text class=\"nodelabel $cell_id\" x=\"25\" y=\"20\" s:attribute=\"value\">Xk</text>\n  <path d=\"M10,0 H40 V10 H10 Z\" class=\"symbol $cell_id\"/>\n  <path d=\"M0,5 H10 M40,5 H50\" class=\"connect $cell_id\"/>\n  <g s:x=\"0\" s:y=\"5\" s:pid=\"A\" s:position=\"left\"/>\n  <g s:x=\"50\" s:y=\"5\" s:pid=\"B\" s:position=\"right\"/>\n</g>\n\n<g s:type=\"resistor_v\" s:width=\"10\" s:height=\"50\" transform=\"translate(25,130)\">\n  <s:alias val=\"r_v\"/>\n  <text x=\"15\"  y=\"15\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <text x=\"15\" y=\"30\" s:attribute=\"value\" class=\"$cell_id\" >Xk</text>\n  <path d=\"M0,10 V40 H10 V10 Z\" class=\"symbol $cell_id\"/>\n  <path d=\"M5,0 V10 M5,40 V50\" class=\"connect $cell_id\"/>\n  <g s:x=\"5\" s:y=\"0\" s:pid=\"A\" s:position=\"top\"/>\n  <g s:x=\"5\" s:y=\"50\" s:pid=\"B\" s:position=\"bottom\"/>\n</g>\n\n<g s:type=\"capacitor_h\" s:width=\"50\" s:height=\"30\" transform=\"translate(60,100)\">\n  <s:alias val=\"c_h\"/>\n  <text x=\"35\" y=\"5\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <text x=\"35\" y=\"30\" s:attribute=\"value\" class=\"$cell_id\">Xu</text>\n  <path d=\"M20,0 V30 M30,0 V30\" class=\"symbol $cell_id\"/>\n  <path d=\"M0,15 H20 M30,15 H50\" class=\"connect $cell_id\"/>\n  <g s:x=\"0\" s:y=\"15\" s:pid=\"A\" s:position=\"left\"/>\n  <g s:x=\"50\" s:y=\"15\" s:pid=\"B\" s:position=\"right\"/>\n</g>\n\n<g s:type=\"capacitor_v\" s:width=\"30\" s:height=\"50\" transform=\"translate(70,130)\">\n  <s:alias val=\"c_v\"/>\n  <text x=\"25\" y=\"10\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <text x=\"25\" y=\"45\" s:attribute=\"value\" class=\"$cell_id\">Xu</text>\n  <path d=\"M0,20 H30 M0,30 H30\" class=\"symbol $cell_id\"/>\n  <path d=\"M15,0 V20 M15,30 V50\" class=\"connect $cell_id\"/>\n  <g s:x=\"15\" s:y=\"0\" s:pid=\"A\" s:position=\"top\"/>\n  <g s:x=\"15\" s:y=\"50\" s:pid=\"B\" s:position=\"bottom\"/>\n</g>\n\n<g s:type=\"inductor_h\" s:width=\"50\" s:height=\"10\" transform=\"translate(115,110)\">\n  <s:alias val=\"l_h\"/>\n  <text class=\"nodelabel $cell_id\" x=\"25\" y=\"-5\" s:attribute=\"ref\">X1</text>\n  <text class=\"nodelabel $cell_id\" x=\"25\" y=\"20\" s:attribute=\"value\">XpF</text>\n  <path d=\"M5,5 A5,5 0 0 1 15,5 A5,5 0 0 1 25,5 A5,5 0 0 1 35,5 A5,5 0 0 1 45,5\" class=\"$cell_id\"/>\n  <path d=\"M0,5 H5 M45,5 H50\" class=\"connect $cell_id\"/>\n  <g s:x=\"0\" s:y=\"5\" s:pid=\"A\" s:position=\"left\"/>\n  <g s:x=\"50\" s:y=\"5\" s:pid=\"B\" s:position=\"right\"/>\n</g>\n\n<g s:type=\"inductor_v\" s:width=\"10\" s:height=\"50\" transform=\"translate(135,130)\">\n  <s:alias val=\"l_v\"/>\n  <text x=\"15\" y=\"15\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <text x=\"15\" y=\"35\" s:attribute=\"value\" class=\"$cell_id\">XpF</text>\n  <path d=\"M5,5 A5,5 0 0 1 5,15 A5,5 0 0 1 5,25 A5,5 0 0 1 5,35 A5,5 0 0 1 5,45\" class=\"$cell_id\"/>\n  <path d=\"M5,0 V5 M5,45 V50\" class=\"connect $cell_id\"/>\n  <g s:x=\"5\" s:y=\"0\" s:pid=\"A\" s:position=\"top\"/>\n  <g s:x=\"5\" s:y=\"50\" s:pid=\"B\" s:position=\"bottom\"/>\n</g>\n<!-- passives -->\n\n<!-- sources -->\n<g s:type=\"voltage_source\" s:width=\"32\" s:height=\"52\" transform=\"translate(20,180)\">\n  <s:alias val=\"v\"/>\n  <text x=\"35\" y=\"20\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <text x=\"35\" y=\"35\" s:attribute=\"value\" class=\"$cell_id\">XV</text>\n  <circle cx=\"16\" cy=\"26\" r=\"16\" class=\"symbol $cell_id\"/>\n  <path d=\"M16,10 V42\" class=\"detail $cell_id\"/>\n  <path d=\"M16,0 V10 M16,42 V52\" class=\"connect $cell_id\"/>\n  <g s:x=\"16\" s:y=\"0\" s:pid=\"+\" s:position=\"top\"/>\n  <g s:x=\"16\" s:y=\"52\" s:pid=\"-\" s:position=\"bottom\"/>\n</g>\n\n<g s:type=\"current_source\" s:width=\"32\" s:height=\"52\" transform=\"translate(75,180)\">\n  <s:alias val=\"i\"/>\n  <text x=\"35\" y=\"20\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <text x=\"35\" y=\"35\" s:attribute=\"value\" class=\"$cell_id\">XA</text>\n  <circle cx=\"16\" cy=\"26\" r=\"16\" class=\"symbol $cell_id\"/>\n  <path d=\"M0,26 H32\" class=\"detail $cell_id\"/>\n  <path d=\"M16,0 V10 M16,42 V52\" class=\"connect $cell_id\"/>\n  <g s:x=\"16\" s:y=\"0\" s:pid=\"+\" s:position=\"top\"/>\n  <g s:x=\"16\" s:y=\"52\" s:pid=\"-\" s:position=\"bottom\"/>\n</g>\n<!-- sources -->\n\n<!-- diodes -->\n<g s:type=\"diode_h\" s:width=\"50\" s:height=\"20\" transform=\"translate(5,250)\">\n  <s:alias val=\"d_h\"/>\n  <text class=\"nodelabel $cell_id\" x=\"25\" y=\"-5\" s:attribute=\"ref\">X1</text>\n  <path d=\"M15,0 V20 L35,10 Z M35,0 V20\" class=\"symbol $cell_id\"/>\n  <path d=\"M0,10 H15 M35,10 H50\" class=\"connect $cell_id\"/>\n  <g s:x=\"0\" s:y=\"10\" s:pid=\"+\" s:position=\"left\"/>\n  <g s:x=\"50\" s:y=\"10\" s:pid=\"-\" s:position=\"right\"/>\n</g>\n\n<g s:type=\"diode_v\" s:width=\"20\" s:height=\"50\" transform=\"translate(20,280)\">\n  <s:alias val=\"d_v\"/>\n  <text x=\"25\" y=\"25\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <path d=\"M0,15 H20 L10,35 Z M0,35 H20\" class=\"symbol $cell_id\"/>\n  <path d=\"M10,0 V15 M10,35 V50\" class=\"connect $cell_id\"/>\n  <g s:x=\"10\" s:y=\"0\" s:pid=\"+\" s:position=\"top\"/>\n  <g s:x=\"10\" s:y=\"50\" s:pid=\"-\" s:position=\"bottom\"/>\n</g>\n\n<g s:type=\"diode_schottky_h\" s:width=\"50\" s:height=\"20\" transform=\"translate(60,250)\">\n  <s:alias val=\"d_sk_h\"/>\n  <text class=\"nodelabel $cell_id\" x=\"25\" y=\"-5\" s:attribute=\"ref\">X1</text>\n  <path d=\"M15,0 V20 L35,10 Z M35,0 V20\" class=\"symbol $cell_id\"/>\n  <path d=\"M0,10 H15 M35,10 H50\" class=\"connect $cell_id\"/>\n  <!-- schottky -->\n  <path d=\"M35,0 H40 M35,20 H30\" class=\"symbol $cell_id\"/>\n  <g s:x=\"0\" s:y=\"10\" s:pid=\"+\" s:position=\"left\"/>\n  <g s:x=\"50\" s:y=\"10\" s:pid=\"-\" s:position=\"right\"/>\n</g>\n\n<g s:type=\"diode_schottky_v\" s:width=\"20\" s:height=\"50\" transform=\"translate(75,280)\">\n  <s:alias val=\"d_sk_v\"/>\n  <text x=\"25\" y=\"25\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <path d=\"M0,15 H20 L10,35 Z M0,35 H20\" class=\"symbol $cell_id\"/>\n  <path d=\"M10,0 V15 M10,35 V50\" class=\"connect $cell_id\"/>\n  <!-- schottky -->\n  <path d=\"M0,35 V40 M20,35 V30\" class=\"symbol $cell_id\"/>\n  <g s:x=\"10\" s:y=\"0\" s:pid=\"+\" s:position=\"top\"/>\n  <g s:x=\"10\" s:y=\"50\" s:pid=\"-\" s:position=\"bottom\"/>\n</g>\n\n<g s:type=\"diode_led_h\" s:width=\"50\" s:height=\"20\" transform=\"translate(115,250)\">\n  <s:alias val=\"d_led_h\"/>\n  <text class=\"nodelabel $cell_id\" x=\"10\" y=\"-5\" s:attribute=\"ref\">X1</text>\n  <path d=\"M15,0 V20 L35,10 Z M35,0 V20\" class=\"symbol $cell_id\"/>\n  <path d=\"M0,10 H15 M35,10 H50\" class=\"connect $cell_id\"/>\n  <!-- led -->\n  <path d=\"m20,-5 7,-7\" class=\"detail $cell_id\"/>\n  <path d=\"m24,-12 6,-3 -3,6 z\" class=\"detail $cell_id\"/>\n  <path d=\"m25,0 7,-7\" class=\"detail $cell_id\"/>\n  <path d=\"m29,-7 6,-3 -3,6 z\" class=\"detail $cell_id\"/>\n  <g s:x=\"0\" s:y=\"10\" s:pid=\"+\" s:position=\"top\"/>\n  <g s:x=\"50\" s:y=\"10\" s:pid=\"-\" s:position=\"bottom\"/>\n</g>\n\n<g s:type=\"diode_led_v\" s:width=\"20\" s:height=\"50\" transform=\"translate(130,280)\">\n  <s:alias val=\"d_led_v\"/>\n  <text x=\"25\" y=\"25\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <path d=\"M0,15 H20 L10,35 Z M0,35 H20\" class=\"symbol $cell_id\"/>\n  <path d=\"M10,0 V15 M10,35 V50\" class=\"connect $cell_id\"/>\n  <!-- led -->\n  <path d=\"m-5,20 -7,7\" class=\"detail $cell_id\"/>\n  <path d=\"m-12,24 -3,6 6,-3 z\" class=\"detail $cell_id\"/>\n  <path d=\"m0,25 -7,7\" class=\"detail $cell_id\"/>\n  <path d=\"m-7,29 -3,6 6,-3 z\" class=\"detail $cell_id\"/>\n  <g s:x=\"10\" s:y=\"0\" s:pid=\"+\" s:position=\"top\"/>\n  <g s:x=\"10\" s:y=\"50\" s:pid=\"-\" s:position=\"bottom\"/>\n</g>\n<!-- diodes -->\n\n<!-- transistors -->\n<g s:type=\"transistor_npn\" s:width=\"32\" s:height=\"32\" transform=\"translate(15,350)\">\n  <s:alias val=\"q_npn\"/>\n  <text x=\"35\" y=\"20\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <circle r=\"16\" cx=\"16\" cy=\"16\" class=\"symbol $cell_id\"/>\n  <path d=\"M0,16 H12 M12,6 V26\" class=\"detail $cell_id\"/>\n  <path d=\"m12,10 11,-8\" class=\"detail $cell_id\"/>\n  <path d=\"m12,21 11,8\" class=\"detail $cell_id\"/>\n  <!-- npn -->\n  <path d=\"m23,29 -6,-1 3,-5 z\" style=\"fill:#000000\" class=\"$cell_id\"/>\n  <g s:x=\"22\" s:y=\"2\" s:pid=\"C\" s:position=\"top\"/>\n  <g s:x=\"0\" s:y=\"16\" s:pid=\"B\" s:position=\"left\"/>\n  <g s:x=\"23\" s:y=\"29\" s:pid=\"E\" s:position=\"bottom\"/>\n</g>\n\n<g s:type=\"transistor_pnp\" s:width=\"32\" s:height=\"32\" transform=\"translate(85,350)\">\n  <s:alias val=\"q_pnp\"/>\n  <text x=\"35\" y=\"20\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <circle r=\"16\" cx=\"16\" cy=\"16\" class=\"symbol $cell_id\"/>\n  <path d=\"M0,16 H12 M12,6 V26\" class=\"detail $cell_id\"/>\n  <path d=\"m12,10 11,-8\" class=\"detail $cell_id\"/>\n  <path d=\"m12,21 11,8\" class=\"detail $cell_id\"/>\n  <!-- pnp -->\n  <path d=\"m14,9 6,-1 -3,-5 z\" style=\"fill:#000000\" class=\"$cell_id\"/>\n  <g s:x=\"22\" s:y=\"2\" s:pid=\"C\" s:position=\"top\"/>\n  <g s:x=\"0\" s:y=\"16\" s:pid=\"B\" s:position=\"left\"/>\n  <g s:x=\"23\" s:y=\"29\" s:pid=\"E\" s:position=\"bottom\"/>\n</g>\n<!-- transistors -->\n\n<!-- builtin -->\n<g s:type=\"generic\" s:width=\"30\" s:height=\"40\" transform=\"translate(150, 400)\">\n  <text x=\"15\" y=\"-4\" class=\"nodelabel $cell_id\" s:attribute=\"ref\">generic</text>\n  <rect width=\"30\" height=\"40\" x=\"0\" y=\"0\" s:generic=\"body\" class=\"$cell_id\"/>\n  <g transform=\"translate(30,10)\"\n     s:x=\"30\" s:y=\"10\" s:pid=\"out0\" s:position=\"right\">\n    <text x=\"5\" y=\"-4\" class=\"$cell_id\">out0</text>\n  </g>\n  <g transform=\"translate(30,30)\"\n     s:x=\"30\" s:y=\"30\" s:pid=\"out1\" s:position=\"right\">\n    <text x=\"5\" y=\"-4\" class=\"$cell_id\">out1</text>\n  </g>\n  <g transform=\"translate(0,10)\"\n     s:x=\"0\" s:y=\"10\" s:pid=\"in0\" s:position=\"left\">\n      <text x=\"-3\" y=\"-4\" class=\"inputPortLabel $cell_id\">in0</text>\n  </g>\n  <g transform=\"translate(0,30)\"\n     s:x=\"0\" s:y=\"30\" s:pid=\"in1\" s:position=\"left\">\n    <text x=\"-3\" y=\"-4\" class=\"inputPortLabel $cell_id\">in1</text>\n  </g>\n</g>\n<!-- builtin -->\n\n<!-- misc -->\n<g s:type=\"opamp\" s:width=\"60\" s:height=\"40\" transform=\"translate(20,450)\">\n  <s:alias val=\"op\"/>\n  <text x=\"40\" y=\"35\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <path d=\"M10,0 V40 L50,20 Z\" class=\"symbol $cell_id\"/>\n  <path d=\"M0,10 H10 M0,30 H10 M50,20 H60 M30,0 V10 M30,40 V30\" class=\"connect $cell_id\"/>\n  <path d=\"m15,10 5,0 m-2.5,-2.5 0,5\" class=\"detail $cell_id\"/>\n  <path d=\"m15,30 5,0\" class=\"detail $cell_id\"/>\n  <g s:x=\"0\" s:y=\"10\" s:pid=\"+\" s:position=\"left\"/>\n  <g s:x=\"0\" s:y=\"30\" s:pid=\"-\" s:position=\"left\"/>\n  <g s:x=\"60\" s:y=\"20\" s:pid=\"OUT\" s:position=\"right\"/>\n  <g s:x=\"30\" s:y=\"0\" s:pid=\"VCC\" s:position=\"top\"/>\n  <g s:x=\"30\" s:y=\"40\" s:pid=\"VEE\" s:position=\"bottom\"/>\n</g>\n\n<g s:type=\"xtal\" s:width=\"40\" s:height=\"30\" transform=\"translate(90,450)\">\n  <s:alias val=\"xtal\"/>\n  <text class=\"nodelabel $cell_id\" x=\"20\" y=\"45\" s:attribute=\"ref\">X1</text>\n  <rect x=\"15\" y=\"0\" width=\"10\" height=\"30\" class=\"symbol $cell_id\" />\n  <path d=\"M0,15 H10 M10,5 V25 M30,5 V25 M30,15 H40\" class=\"$cell_id\"/>\n  <g s:x=\"0\" s:y=\"15\" s:pid=\"A\" s:position=\"left\"/>\n  <g s:x=\"40\" s:y=\"15\" s:pid=\"B\" s:position=\"right\"/>\n</g>\n\n<g s:type=\"transformer_1p_1s\" s:width=\"35\" s:height=\"45\" transform=\"translate(140,450)\">\n  <s:alias val=\"transformer_1p_1s\"/>\n  <text class=\"nodelabel $cell_id\" x=\"25\" y=\"55\" s:attribute=\"ref\">X1</text>\n  <path d=\"M10,0 A5,5 0 0 1 10,10 A5,5 0 0 1 10,20 A5,5 0 0 1 10,30 A5,5 0 0 1 10,40\" class=\"$cell_id\"/>\n  <path d=\"M35,0 A5,5 0 0 0 35,10 A5,5 0 0 0 35,20 A5,5 0 0 0 35,30 A5,5 0 0 0 35,40\" class=\"$cell_id\"/>\n  <path d=\"M20,0 V40 M25,0 V40\" class=\"symbol $cell_id\"/>\n  <path d=\"M0,0 H10 M0,40 H10 M35,0 H45 M35,40 H45\" class=\"connect $cell_id\"/>\n  <g s:x=\"0\" s:y=\"0\" s:pid=\"L1.1\" s:position=\"left\"/>\n  <g s:x=\"0\" s:y=\"40\" s:pid=\"L1.2\" s:position=\"left\"/>\n  <g s:x=\"40\" s:y=\"0\" s:pid=\"L2.1\" s:position=\"right\"/>\n  <g s:x=\"40\" s:y=\"40\" s:pid=\"L2.2\" s:position=\"right\"/>\n</g>\n<!-- misc -->\n</svg>\n";
-const exampleDigital = Buffer("ewogICJjcmVhdG9yIjogIllvc3lzIDAuNSsyMjAgKGdpdCBzaGExIDk0ZmJhZmYsIGVtY2MgIC1PcykiLAogICJtb2R1bGVzIjogewogICAgInVwM2Rvd241IjogewogICAgICAicG9ydHMiOiB7CiAgICAgICAgImNsb2NrIjogewogICAgICAgICAgImRpcmVjdGlvbiI6ICJpbnB1dCIsCiAgICAgICAgICAiYml0cyI6IFsgMiBdCiAgICAgICAgfSwKICAgICAgICAiZGF0YV9pbiI6IHsKICAgICAgICAgICJkaXJlY3Rpb24iOiAiaW5wdXQiLAogICAgICAgICAgImJpdHMiOiBbIDMsIDQsIDUsIDYsIDcsIDgsIDksIDEwLCAxMSBdCiAgICAgICAgfSwKICAgICAgICAidXAiOiB7CiAgICAgICAgICAiZGlyZWN0aW9uIjogImlucHV0IiwKICAgICAgICAgICJiaXRzIjogWyAxMiBdCiAgICAgICAgfSwKICAgICAgICAiZG93biI6IHsKICAgICAgICAgICJkaXJlY3Rpb24iOiAiaW5wdXQiLAogICAgICAgICAgImJpdHMiOiBbIDEzIF0KICAgICAgICB9LAogICAgICAgICJjYXJyeV9vdXQiOiB7CiAgICAgICAgICAiZGlyZWN0aW9uIjogIm91dHB1dCIsCiAgICAgICAgICAiYml0cyI6IFsgMTQgXQogICAgICAgIH0sCiAgICAgICAgImJvcnJvd19vdXQiOiB7CiAgICAgICAgICAiZGlyZWN0aW9uIjogIm91dHB1dCIsCiAgICAgICAgICAiYml0cyI6IFsgMTUgXQogICAgICAgIH0sCiAgICAgICAgImNvdW50X291dCI6IHsKICAgICAgICAgICJkaXJlY3Rpb24iOiAib3V0cHV0IiwKICAgICAgICAgICJiaXRzIjogWyAxNiwgMTcsIDE4LCAxOSwgMjAsIDIxLCAyMiwgMjMsIDI0IF0KICAgICAgICB9LAogICAgICAgICJwYXJpdHlfb3V0IjogewogICAgICAgICAgImRpcmVjdGlvbiI6ICJvdXRwdXQiLAogICAgICAgICAgImJpdHMiOiBbIDI1IF0KICAgICAgICB9CiAgICAgIH0sCiAgICAgICJjZWxscyI6IHsKICAgICAgICAiJGFkZCRpbnB1dC52OjE3JDMiOiB7CiAgICAgICAgICAiaGlkZV9uYW1lIjogMSwKICAgICAgICAgICJ0eXBlIjogIiRhZGQiLAogICAgICAgICAgInBhcmFtZXRlcnMiOiB7CiAgICAgICAgICAgICJBX1NJR05FRCI6IDAsCiAgICAgICAgICAgICJBX1dJRFRIIjogOSwKICAgICAgICAgICAgIkJfU0lHTkVEIjogMCwKICAgICAgICAgICAgIkJfV0lEVEgiOiAyLAogICAgICAgICAgICAiWV9XSURUSCI6IDEwCiAgICAgICAgICB9LAogICAgICAgICAgImF0dHJpYnV0ZXMiOiB7CiAgICAgICAgICAgICJzcmMiOiAiaW5wdXQudjoxNyIKICAgICAgICAgIH0sCiAgICAgICAgICAicG9ydF9kaXJlY3Rpb25zIjogewogICAgICAgICAgICAiQSI6ICJpbnB1dCIsCiAgICAgICAgICAgICJCIjogImlucHV0IiwKICAgICAgICAgICAgIlkiOiAib3V0cHV0IgogICAgICAgICAgfSwKICAgICAgICAgICJjb25uZWN0aW9ucyI6IHsKICAgICAgICAgICAgIkEiOiBbIDE2LCAxNywgMTgsIDE5LCAyMCwgMjEsIDIyLCAyMywgMjQgXSwKICAgICAgICAgICAgIkIiOiBbICIxIiwgIjEiIF0sCiAgICAgICAgICAgICJZIjogWyAyNiwgMjcsIDI4LCAyOSwgMzAsIDMxLCAzMiwgMzMsIDM0LCAzNSBdCiAgICAgICAgICB9CiAgICAgICAgfSwKICAgICAgICAiJGFuZCRpbnB1dC52OjI4JDUiOiB7CiAgICAgICAgICAiaGlkZV9uYW1lIjogMSwKICAgICAgICAgICJ0eXBlIjogIiRhbmQiLAogICAgICAgICAgInBhcmFtZXRlcnMiOiB7CiAgICAgICAgICAgICJBX1NJR05FRCI6IDAsCiAgICAgICAgICAgICJBX1dJRFRIIjogMSwKICAgICAgICAgICAgIkJfU0lHTkVEIjogMCwKICAgICAgICAgICAgIkJfV0lEVEgiOiAxLAogICAgICAgICAgICAiWV9XSURUSCI6IDEKICAgICAgICAgIH0sCiAgICAgICAgICAiYXR0cmlidXRlcyI6IHsKICAgICAgICAgICAgInNyYyI6ICJpbnB1dC52OjI4IgogICAgICAgICAgfSwKICAgICAgICAgICJwb3J0X2RpcmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJBIjogImlucHV0IiwKICAgICAgICAgICAgIkIiOiAiaW5wdXQiLAogICAgICAgICAgICAiWSI6ICJvdXRwdXQiCiAgICAgICAgICB9LAogICAgICAgICAgImNvbm5lY3Rpb25zIjogewogICAgICAgICAgICAiQSI6IFsgMTIgXSwKICAgICAgICAgICAgIkIiOiBbIDM1IF0sCiAgICAgICAgICAgICJZIjogWyAzNiBdCiAgICAgICAgICB9CiAgICAgICAgfSwKICAgICAgICAiJGFuZCRpbnB1dC52OjI5JDYiOiB7CiAgICAgICAgICAiaGlkZV9uYW1lIjogMSwKICAgICAgICAgICJ0eXBlIjogIiRhbmQiLAogICAgICAgICAgInBhcmFtZXRlcnMiOiB7CiAgICAgICAgICAgICJBX1NJR05FRCI6IDAsCiAgICAgICAgICAgICJBX1dJRFRIIjogMSwKICAgICAgICAgICAgIkJfU0lHTkVEIjogMCwKICAgICAgICAgICAgIkJfV0lEVEgiOiAxLAogICAgICAgICAgICAiWV9XSURUSCI6IDEKICAgICAgICAgIH0sCiAgICAgICAgICAiYXR0cmlidXRlcyI6IHsKICAgICAgICAgICAgInNyYyI6ICJpbnB1dC52OjI5IgogICAgICAgICAgfSwKICAgICAgICAgICJwb3J0X2RpcmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJBIjogImlucHV0IiwKICAgICAgICAgICAgIkIiOiAiaW5wdXQiLAogICAgICAgICAgICAiWSI6ICJvdXRwdXQiCiAgICAgICAgICB9LAogICAgICAgICAgImNvbm5lY3Rpb25zIjogewogICAgICAgICAgICAiQSI6IFsgMTMgXSwKICAgICAgICAgICAgIkIiOiBbIDM3IF0sCiAgICAgICAgICAgICJZIjogWyAzOCBdCiAgICAgICAgICB9CiAgICAgICAgfSwKICAgICAgICAiJHByb2NkZmYkNDAiOiB7CiAgICAgICAgICAiaGlkZV9uYW1lIjogMSwKICAgICAgICAgICJ0eXBlIjogIiRkZmYiLAogICAgICAgICAgInBhcmFtZXRlcnMiOiB7CiAgICAgICAgICAgICJDTEtfUE9MQVJJVFkiOiAxLAogICAgICAgICAgICAiV0lEVEgiOiA5CiAgICAgICAgICB9LAogICAgICAgICAgImF0dHJpYnV0ZXMiOiB7CiAgICAgICAgICAgICJzcmMiOiAiaW5wdXQudjoxNCIKICAgICAgICAgIH0sCiAgICAgICAgICAicG9ydF9kaXJlY3Rpb25zIjogewogICAgICAgICAgICAiQ0xLIjogImlucHV0IiwKICAgICAgICAgICAgIkQiOiAiaW5wdXQiLAogICAgICAgICAgICAiUSI6ICJvdXRwdXQiCiAgICAgICAgICB9LAogICAgICAgICAgImNvbm5lY3Rpb25zIjogewogICAgICAgICAgICAiQ0xLIjogWyAyIF0sCiAgICAgICAgICAgICJEIjogWyAzOSwgNDAsIDQxLCA0MiwgNDMsIDQ0LCA0NSwgNDYsIDQ3IF0sCiAgICAgICAgICAgICJRIjogWyAxNiwgMTcsIDE4LCAxOSwgMjAsIDIxLCAyMiwgMjMsIDI0IF0KICAgICAgICAgIH0KICAgICAgICB9LAogICAgICAgICIkcHJvY2RmZiQ0MSI6IHsKICAgICAgICAgICJoaWRlX25hbWUiOiAxLAogICAgICAgICAgInR5cGUiOiAiJGRmZiIsCiAgICAgICAgICAicGFyYW1ldGVycyI6IHsKICAgICAgICAgICAgIkNMS19QT0xBUklUWSI6IDEsCiAgICAgICAgICAgICJXSURUSCI6IDEKICAgICAgICAgIH0sCiAgICAgICAgICAiYXR0cmlidXRlcyI6IHsKICAgICAgICAgICAgInNyYyI6ICJpbnB1dC52OjE0IgogICAgICAgICAgfSwKICAgICAgICAgICJwb3J0X2RpcmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJDTEsiOiAiaW5wdXQiLAogICAgICAgICAgICAiRCI6ICJpbnB1dCIsCiAgICAgICAgICAgICJRIjogIm91dHB1dCIKICAgICAgICAgIH0sCiAgICAgICAgICAiY29ubmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJDTEsiOiBbIDIgXSwKICAgICAgICAgICAgIkQiOiBbIDM2IF0sCiAgICAgICAgICAgICJRIjogWyAxNCBdCiAgICAgICAgICB9CiAgICAgICAgfSwKICAgICAgICAiJHByb2NkZmYkNDIiOiB7CiAgICAgICAgICAiaGlkZV9uYW1lIjogMSwKICAgICAgICAgICJ0eXBlIjogIiRkZmYiLAogICAgICAgICAgInBhcmFtZXRlcnMiOiB7CiAgICAgICAgICAgICJDTEtfUE9MQVJJVFkiOiAxLAogICAgICAgICAgICAiV0lEVEgiOiAxCiAgICAgICAgICB9LAogICAgICAgICAgImF0dHJpYnV0ZXMiOiB7CiAgICAgICAgICAgICJzcmMiOiAiaW5wdXQudjoxNCIKICAgICAgICAgIH0sCiAgICAgICAgICAicG9ydF9kaXJlY3Rpb25zIjogewogICAgICAgICAgICAiQ0xLIjogImlucHV0IiwKICAgICAgICAgICAgIkQiOiAiaW5wdXQiLAogICAgICAgICAgICAiUSI6ICJvdXRwdXQiCiAgICAgICAgICB9LAogICAgICAgICAgImNvbm5lY3Rpb25zIjogewogICAgICAgICAgICAiQ0xLIjogWyAyIF0sCiAgICAgICAgICAgICJEIjogWyAzOCBdLAogICAgICAgICAgICAiUSI6IFsgMTUgXQogICAgICAgICAgfQogICAgICAgIH0sCiAgICAgICAgIiRwcm9jZGZmJDQzIjogewogICAgICAgICAgImhpZGVfbmFtZSI6IDEsCiAgICAgICAgICAidHlwZSI6ICIkZGZmIiwKICAgICAgICAgICJwYXJhbWV0ZXJzIjogewogICAgICAgICAgICAiQ0xLX1BPTEFSSVRZIjogMSwKICAgICAgICAgICAgIldJRFRIIjogMQogICAgICAgICAgfSwKICAgICAgICAgICJhdHRyaWJ1dGVzIjogewogICAgICAgICAgICAic3JjIjogImlucHV0LnY6MTQiCiAgICAgICAgICB9LAogICAgICAgICAgInBvcnRfZGlyZWN0aW9ucyI6IHsKICAgICAgICAgICAgIkNMSyI6ICJpbnB1dCIsCiAgICAgICAgICAgICJEIjogImlucHV0IiwKICAgICAgICAgICAgIlEiOiAib3V0cHV0IgogICAgICAgICAgfSwKICAgICAgICAgICJjb25uZWN0aW9ucyI6IHsKICAgICAgICAgICAgIkNMSyI6IFsgMiBdLAogICAgICAgICAgICAiRCI6IFsgNDggXSwKICAgICAgICAgICAgIlEiOiBbIDI1IF0KICAgICAgICAgIH0KICAgICAgICB9LAogICAgICAgICIkcHJvY211eCQzNiI6IHsKICAgICAgICAgICJoaWRlX25hbWUiOiAxLAogICAgICAgICAgInR5cGUiOiAiJHBtdXgiLAogICAgICAgICAgInBhcmFtZXRlcnMiOiB7CiAgICAgICAgICAgICJTX1dJRFRIIjogMywKICAgICAgICAgICAgIldJRFRIIjogOQogICAgICAgICAgfSwKICAgICAgICAgICJhdHRyaWJ1dGVzIjogewogICAgICAgICAgfSwKICAgICAgICAgICJwb3J0X2RpcmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJBIjogImlucHV0IiwKICAgICAgICAgICAgIkIiOiAiaW5wdXQiLAogICAgICAgICAgICAiUyI6ICJpbnB1dCIsCiAgICAgICAgICAgICJZIjogIm91dHB1dCIKICAgICAgICAgIH0sCiAgICAgICAgICAiY29ubmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJBIjogWyAxNiwgMTcsIDE4LCAxOSwgMjAsIDIxLCAyMiwgMjMsIDI0IF0sCiAgICAgICAgICAgICJCIjogWyAyNiwgMjcsIDI4LCAyOSwgMzAsIDMxLCAzMiwgMzMsIDM0LCA0OSwgNTAsIDUxLCA1MiwgNTMsIDU0LCA1NSwgNTYsIDU3LCAzLCA0LCA1LCA2LCA3LCA4LCA5LCAxMCwgMTEgXSwKICAgICAgICAgICAgIlMiOiBbIDU4LCA1OSwgNjAgXSwKICAgICAgICAgICAgIlkiOiBbIDM5LCA0MCwgNDEsIDQyLCA0MywgNDQsIDQ1LCA0NiwgNDcgXQogICAgICAgICAgfQogICAgICAgIH0sCiAgICAgICAgIiRwcm9jbXV4JDM3X0NNUDAiOiB7CiAgICAgICAgICAiaGlkZV9uYW1lIjogMSwKICAgICAgICAgICJ0eXBlIjogIiRlcSIsCiAgICAgICAgICAicGFyYW1ldGVycyI6IHsKICAgICAgICAgICAgIkFfU0lHTkVEIjogMCwKICAgICAgICAgICAgIkFfV0lEVEgiOiAyLAogICAgICAgICAgICAiQl9TSUdORUQiOiAwLAogICAgICAgICAgICAiQl9XSURUSCI6IDIsCiAgICAgICAgICAgICJZX1dJRFRIIjogMQogICAgICAgICAgfSwKICAgICAgICAgICJhdHRyaWJ1dGVzIjogewogICAgICAgICAgfSwKICAgICAgICAgICJwb3J0X2RpcmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJBIjogImlucHV0IiwKICAgICAgICAgICAgIkIiOiAiaW5wdXQiLAogICAgICAgICAgICAiWSI6ICJvdXRwdXQiCiAgICAgICAgICB9LAogICAgICAgICAgImNvbm5lY3Rpb25zIjogewogICAgICAgICAgICAiQSI6IFsgMTMsIDEyIF0sCiAgICAgICAgICAgICJCIjogWyAiMCIsICIxIiBdLAogICAgICAgICAgICAiWSI6IFsgNTggXQogICAgICAgICAgfQogICAgICAgIH0sCiAgICAgICAgIiRwcm9jbXV4JDM4X0NNUDAiOiB7CiAgICAgICAgICAiaGlkZV9uYW1lIjogMSwKICAgICAgICAgICJ0eXBlIjogIiRlcSIsCiAgICAgICAgICAicGFyYW1ldGVycyI6IHsKICAgICAgICAgICAgIkFfU0lHTkVEIjogMCwKICAgICAgICAgICAgIkFfV0lEVEgiOiAyLAogICAgICAgICAgICAiQl9TSUdORUQiOiAwLAogICAgICAgICAgICAiQl9XSURUSCI6IDIsCiAgICAgICAgICAgICJZX1dJRFRIIjogMQogICAgICAgICAgfSwKICAgICAgICAgICJhdHRyaWJ1dGVzIjogewogICAgICAgICAgfSwKICAgICAgICAgICJwb3J0X2RpcmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJBIjogImlucHV0IiwKICAgICAgICAgICAgIkIiOiAiaW5wdXQiLAogICAgICAgICAgICAiWSI6ICJvdXRwdXQiCiAgICAgICAgICB9LAogICAgICAgICAgImNvbm5lY3Rpb25zIjogewogICAgICAgICAgICAiQSI6IFsgMTMsIDEyIF0sCiAgICAgICAgICAgICJCIjogWyAiMSIsICIwIiBdLAogICAgICAgICAgICAiWSI6IFsgNTkgXQogICAgICAgICAgfQogICAgICAgIH0sCiAgICAgICAgIiRwcm9jbXV4JDM5X0NNUDAiOiB7CiAgICAgICAgICAiaGlkZV9uYW1lIjogMSwKICAgICAgICAgICJ0eXBlIjogIiRlcSIsCiAgICAgICAgICAicGFyYW1ldGVycyI6IHsKICAgICAgICAgICAgIkFfU0lHTkVEIjogMCwKICAgICAgICAgICAgIkFfV0lEVEgiOiAyLAogICAgICAgICAgICAiQl9TSUdORUQiOiAwLAogICAgICAgICAgICAiQl9XSURUSCI6IDIsCiAgICAgICAgICAgICJZX1dJRFRIIjogMQogICAgICAgICAgfSwKICAgICAgICAgICJhdHRyaWJ1dGVzIjogewogICAgICAgICAgfSwKICAgICAgICAgICJwb3J0X2RpcmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJBIjogImlucHV0IiwKICAgICAgICAgICAgIkIiOiAiaW5wdXQiLAogICAgICAgICAgICAiWSI6ICJvdXRwdXQiCiAgICAgICAgICB9LAogICAgICAgICAgImNvbm5lY3Rpb25zIjogewogICAgICAgICAgICAiQSI6IFsgMTMsIDEyIF0sCiAgICAgICAgICAgICJCIjogWyAiMCIsICIwIiBdLAogICAgICAgICAgICAiWSI6IFsgNjAgXQogICAgICAgICAgfQogICAgICAgIH0sCiAgICAgICAgIiRyZWR1Y2VfeG9yJGlucHV0LnY6MjckNCI6IHsKICAgICAgICAgICJoaWRlX25hbWUiOiAxLAogICAgICAgICAgInR5cGUiOiAiJHJlZHVjZV94b3IiLAogICAgICAgICAgInBhcmFtZXRlcnMiOiB7CiAgICAgICAgICAgICJBX1NJR05FRCI6IDAsCiAgICAgICAgICAgICJBX1dJRFRIIjogOSwKICAgICAgICAgICAgIllfV0lEVEgiOiAxCiAgICAgICAgICB9LAogICAgICAgICAgImF0dHJpYnV0ZXMiOiB7CiAgICAgICAgICAgICJzcmMiOiAiaW5wdXQudjoyNyIKICAgICAgICAgIH0sCiAgICAgICAgICAicG9ydF9kaXJlY3Rpb25zIjogewogICAgICAgICAgICAiQSI6ICJpbnB1dCIsCiAgICAgICAgICAgICJZIjogIm91dHB1dCIKICAgICAgICAgIH0sCiAgICAgICAgICAiY29ubmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJBIjogWyAzOSwgNDAsIDQxLCA0MiwgNDMsIDQ0LCA0NSwgNDYsIDQ3IF0sCiAgICAgICAgICAgICJZIjogWyA0OCBdCiAgICAgICAgICB9CiAgICAgICAgfSwKICAgICAgICAiJHN1YiRpbnB1dC52OjE2JDIiOiB7CiAgICAgICAgICAiaGlkZV9uYW1lIjogMSwKICAgICAgICAgICJ0eXBlIjogIiRzdWIiLAogICAgICAgICAgInBhcmFtZXRlcnMiOiB7CiAgICAgICAgICAgICJBX1NJR05FRCI6IDAsCiAgICAgICAgICAgICJBX1dJRFRIIjogOSwKICAgICAgICAgICAgIkJfU0lHTkVEIjogMCwKICAgICAgICAgICAgIkJfV0lEVEgiOiAzLAogICAgICAgICAgICAiWV9XSURUSCI6IDEwCiAgICAgICAgICB9LAogICAgICAgICAgImF0dHJpYnV0ZXMiOiB7CiAgICAgICAgICAgICJzcmMiOiAiaW5wdXQudjoxNiIKICAgICAgICAgIH0sCiAgICAgICAgICAicG9ydF9kaXJlY3Rpb25zIjogewogICAgICAgICAgICAiQSI6ICJpbnB1dCIsCiAgICAgICAgICAgICJCIjogImlucHV0IiwKICAgICAgICAgICAgIlkiOiAib3V0cHV0IgogICAgICAgICAgfSwKICAgICAgICAgICJjb25uZWN0aW9ucyI6IHsKICAgICAgICAgICAgIkEiOiBbIDE2LCAxNywgMTgsIDE5LCAyMCwgMjEsIDIyLCAyMywgMjQgXSwKICAgICAgICAgICAgIkIiOiBbICIxIiwgIjAiLCAiMSIgXSwKICAgICAgICAgICAgIlkiOiBbIDQ5LCA1MCwgNTEsIDUyLCA1MywgNTQsIDU1LCA1NiwgNTcsIDM3IF0KICAgICAgICAgIH0KICAgICAgICB9CiAgICAgIH0sCiAgICAgICJuZXRuYW1lcyI6IHsKICAgICAgICAiJDBcXGJvcnJvd19vdXRbMDowXSI6IHsKICAgICAgICAgICJoaWRlX25hbWUiOiAxLAogICAgICAgICAgImJpdHMiOiBbIDM4IF0sCiAgICAgICAgICAiYXR0cmlidXRlcyI6IHsKICAgICAgICAgICAgInNyYyI6ICJpbnB1dC52OjE0IgogICAgICAgICAgfQogICAgICAgIH0sCiAgICAgICAgIiQwXFxjYXJyeV9vdXRbMDowXSI6IHsKICAgICAgICAgICJoaWRlX25hbWUiOiAxLAogICAgICAgICAgImJpdHMiOiBbIDM2IF0sCiAgICAgICAgICAiYXR0cmlidXRlcyI6IHsKICAgICAgICAgICAgInNyYyI6ICJpbnB1dC52OjE0IgogICAgICAgICAgfQogICAgICAgIH0sCiAgICAgICAgIiQwXFxjbnRfZG5bOTowXSI6IHsKICAgICAgICAgICJoaWRlX25hbWUiOiAxLAogICAgICAgICAgImJpdHMiOiBbIDQ5LCA1MCwgNTEsIDUyLCA1MywgNTQsIDU1LCA1NiwgNTcsIDM3IF0sCiAgICAgICAgICAiYXR0cmlidXRlcyI6IHsKICAgICAgICAgICAgInNyYyI6ICJpbnB1dC52OjE0IgogICAgICAgICAgfQogICAgICAgIH0sCiAgICAgICAgIiQwXFxjbnRfdXBbOTowXSI6IHsKICAgICAgICAgICJoaWRlX25hbWUiOiAxLAogICAgICAgICAgImJpdHMiOiBbIDI2LCAyNywgMjgsIDI5LCAzMCwgMzEsIDMyLCAzMywgMzQsIDM1IF0sCiAgICAgICAgICAiYXR0cmlidXRlcyI6IHsKICAgICAgICAgICAgInNyYyI6ICJpbnB1dC52OjE0IgogICAgICAgICAgfQogICAgICAgIH0sCiAgICAgICAgIiQwXFxjb3VudF9vdXRbODowXSI6IHsKICAgICAgICAgICJoaWRlX25hbWUiOiAxLAogICAgICAgICAgImJpdHMiOiBbIDM5LCA0MCwgNDEsIDQyLCA0MywgNDQsIDQ1LCA0NiwgNDcgXSwKICAgICAgICAgICJhdHRyaWJ1dGVzIjogewogICAgICAgICAgICAic3JjIjogImlucHV0LnY6MTQiCiAgICAgICAgICB9CiAgICAgICAgfSwKICAgICAgICAiJDBcXHBhcml0eV9vdXRbMDowXSI6IHsKICAgICAgICAgICJoaWRlX25hbWUiOiAxLAogICAgICAgICAgImJpdHMiOiBbIDQ4IF0sCiAgICAgICAgICAiYXR0cmlidXRlcyI6IHsKICAgICAgICAgICAgInNyYyI6ICJpbnB1dC52OjE0IgogICAgICAgICAgfQogICAgICAgIH0sCiAgICAgICAgIiRwcm9jbXV4JDM3X0NNUCI6IHsKICAgICAgICAgICJoaWRlX25hbWUiOiAxLAogICAgICAgICAgImJpdHMiOiBbIDU4IF0sCiAgICAgICAgICAiYXR0cmlidXRlcyI6IHsKICAgICAgICAgIH0KICAgICAgICB9LAogICAgICAgICIkcHJvY211eCQzOF9DTVAiOiB7CiAgICAgICAgICAiaGlkZV9uYW1lIjogMSwKICAgICAgICAgICJiaXRzIjogWyA1OSBdLAogICAgICAgICAgImF0dHJpYnV0ZXMiOiB7CiAgICAgICAgICB9CiAgICAgICAgfSwKICAgICAgICAiJHByb2NtdXgkMzlfQ01QIjogewogICAgICAgICAgImhpZGVfbmFtZSI6IDEsCiAgICAgICAgICAiYml0cyI6IFsgNjAgXSwKICAgICAgICAgICJhdHRyaWJ1dGVzIjogewogICAgICAgICAgfQogICAgICAgIH0sCiAgICAgICAgImJvcnJvd19vdXQiOiB7CiAgICAgICAgICAiaGlkZV9uYW1lIjogMCwKICAgICAgICAgICJiaXRzIjogWyAxNSBdLAogICAgICAgICAgImF0dHJpYnV0ZXMiOiB7CiAgICAgICAgICAgICJzcmMiOiAiaW5wdXQudjo5IgogICAgICAgICAgfQogICAgICAgIH0sCiAgICAgICAgImNhcnJ5X291dCI6IHsKICAgICAgICAgICJoaWRlX25hbWUiOiAwLAogICAgICAgICAgImJpdHMiOiBbIDE0IF0sCiAgICAgICAgICAiYXR0cmlidXRlcyI6IHsKICAgICAgICAgICAgInNyYyI6ICJpbnB1dC52OjkiCiAgICAgICAgICB9CiAgICAgICAgfSwKICAgICAgICAiY2xvY2siOiB7CiAgICAgICAgICAiaGlkZV9uYW1lIjogMCwKICAgICAgICAgICJiaXRzIjogWyAyIF0sCiAgICAgICAgICAiYXR0cmlidXRlcyI6IHsKICAgICAgICAgICAgInNyYyI6ICJpbnB1dC52OjYiCiAgICAgICAgICB9CiAgICAgICAgfSwKICAgICAgICAiY291bnRfb3V0IjogewogICAgICAgICAgImhpZGVfbmFtZSI6IDAsCiAgICAgICAgICAiYml0cyI6IFsgMTYsIDE3LCAxOCwgMTksIDIwLCAyMSwgMjIsIDIzLCAyNCBdLAogICAgICAgICAgImF0dHJpYnV0ZXMiOiB7CiAgICAgICAgICAgICJzcmMiOiAiaW5wdXQudjo4IgogICAgICAgICAgfQogICAgICAgIH0sCiAgICAgICAgImRhdGFfaW4iOiB7CiAgICAgICAgICAiaGlkZV9uYW1lIjogMCwKICAgICAgICAgICJiaXRzIjogWyAzLCA0LCA1LCA2LCA3LCA4LCA5LCAxMCwgMTEgXSwKICAgICAgICAgICJhdHRyaWJ1dGVzIjogewogICAgICAgICAgICAic3JjIjogImlucHV0LnY6NSIKICAgICAgICAgIH0KICAgICAgICB9LAogICAgICAgICJkb3duIjogewogICAgICAgICAgImhpZGVfbmFtZSI6IDAsCiAgICAgICAgICAiYml0cyI6IFsgMTMgXSwKICAgICAgICAgICJhdHRyaWJ1dGVzIjogewogICAgICAgICAgICAic3JjIjogImlucHV0LnY6NiIKICAgICAgICAgIH0KICAgICAgICB9LAogICAgICAgICJwYXJpdHlfb3V0IjogewogICAgICAgICAgImhpZGVfbmFtZSI6IDAsCiAgICAgICAgICAiYml0cyI6IFsgMjUgXSwKICAgICAgICAgICJhdHRyaWJ1dGVzIjogewogICAgICAgICAgICAic3JjIjogImlucHV0LnY6OSIKICAgICAgICAgIH0KICAgICAgICB9LAogICAgICAgICJ1cCI6IHsKICAgICAgICAgICJoaWRlX25hbWUiOiAwLAogICAgICAgICAgImJpdHMiOiBbIDEyIF0sCiAgICAgICAgICAiYXR0cmlidXRlcyI6IHsKICAgICAgICAgICAgInNyYyI6ICJpbnB1dC52OjYiCiAgICAgICAgICB9CiAgICAgICAgfQogICAgICB9CiAgICB9CiAgfQp9","base64");
+const digital = "<svg  xmlns=\"http://www.w3.org/2000/svg\"\n  xmlns:xlink=\"http://www.w3.org/1999/xlink\"\n  xmlns:s=\"https://github.com/nturley/netlistsvg\"\n  width=\"800\" height=\"400\">\n  <s:properties>\n    <s:layoutEngine\n      org.eclipse.elk.layered.spacing.nodeNodeBetweenLayers=\"35\"\n      org.eclipse.elk.spacing.nodeNode= \"35\"\n      org.eclipse.elk.layered.layering.strategy= \"LONGEST_PATH\"\n    />\n    <s:low_priority_alias val=\"$dff\" />\n  </s:properties>\n<style>\nsvg {\n  stroke:#000;\n  fill:none;\n}\ntext {\n  fill:#000;\n  stroke:none;\n  font-size:10px;\n  font-weight: bold;\n  font-family: \"Courier New\", monospace;\n}\nline {\n    stroke-linecap: round;\n}\n.nodelabel {\n  text-anchor: middle;\n}\n.inputPortLabel {\n  text-anchor: end;\n}\n.splitjoinBody {\n  fill:#000;\n}\n</style>\n  <g s:type=\"mux\" transform=\"translate(50, 50)\" s:width=\"20\" s:height=\"40\">\n    <s:alias val=\"$pmux\"/>\n    <s:alias val=\"$mux\"/>\n    <s:alias val=\"$_MUX_\"/>\n\n    <path d=\"M0,0 L20,10 L20,30 L0,40 Z\" fill=\"#ffffff\" class=\"$cell_id\"/>\n\n    <text x=\"5\" y=\"32\" class=\"nodelabel $cell_id\" s:attribute=\"\">1</text>\n    <text x=\"5\" y=\"13\" class=\"nodelabel $cell_id\" s:attribute=\"\">0</text>\n    <g s:x=\"0\" s:y=\"10\" s:pid=\"A\"/>\n    <g s:x=\"0\" s:y=\"30\" s:pid=\"B\"/>\n    <g s:x=\"10\" s:y=\"35\" s:pid=\"S\"/>\n    <g s:x=\"20\" s:y=\"20\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"mux-bus\" transform=\"translate(100, 50)\" s:width=\"24\" s:height=\"40\">\n    <s:alias val=\"$pmux-bus\"/>\n    <s:alias val=\"$mux-bus\"/>\n    <s:alias val=\"$_MUX_-bus\"/>\n\n    <path d=\"M8,2 L8,0 L24,8 L24,32 L8,40 L8,38\" fill=\"#ffffff\" class=\"$cell_id\"/>\n    <path d=\"M4,2 L4,0 L22,9 L22,31 L4,40 L4,38\" fill=\"#ffffff\" class=\"$cell_id\"/>\n    <path d=\"M0,0 L20,10 L20,30 L0,40 Z\" fill=\"#ffffff\" class=\"$cell_id\"/>\n\n    <text x=\"5\" y=\"32\" class=\"nodelabel $cell_id\" s:attribute=\"\">1</text>\n    <text x=\"5\" y=\"13\" class=\"nodelabel $cell_id\" s:attribute=\"\">0</text>\n    <g s:x=\"-1\" s:y=\"10\" s:pid=\"A\"/>\n    <g s:x=\"-1\" s:y=\"30\" s:pid=\"B\"/>\n    <g s:x=\"12\" s:y=\"38\" s:pid=\"S\"/>\n    <g s:x=\"24.5\" s:y=\"20\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"tribuf\" transform=\"translate(450, 50)\" s:width=\"15\" s:height=\"30\">\n    <s:alias val=\"$tribuf\"/>\n    <s:alias val=\"$_TRIBUF_\"/>\n\n    <s:alias val=\"tribuf-bus\"/>\n    <s:alias val=\"$tribuf-bus\"/>\n    <s:alias val=\"$_TRIBUF_-bus\"/>\n\n    <path d=\"M0,0 L25,15 L0,30 Z\" fill=\"#ffffff\" class=\"$cell_id\"/>\n\n    <g s:x=\"0\" s:y=\"15\" s:pid=\"A\"/>\n    <g s:x=\"11\" s:y=\"6\" s:pid=\"EN\"/>\n    <g s:x=\"25\" s:y=\"15\" s:pid=\"Y\"/>\n  </g>\n\n  <!-- and -->\n  <g s:type=\"and\" transform=\"translate(150,50)\" s:width=\"30\" s:height=\"25\">\n    <s:alias val=\"$and\"/>\n    <s:alias val=\"$logic_and\"/>\n    <s:alias val=\"$_AND_\"/>\n\n    <path d=\"M0,0 L0,25 L15,25 A15 12.5 0 0 0 15,0 Z\" fill=\"#ffffff\" class=\"$cell_id\"/>\n\n    <g s:x=\"0\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"0\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"30\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n  <g s:type=\"nand\" transform=\"translate(150,100)\" s:width=\"30\" s:height=\"25\">\n    <s:alias val=\"$nand\"/>\n    <s:alias val=\"$logic_nand\"/>\n    <s:alias val=\"$_NAND_\"/>\n    <s:alias val=\"$_ANDNOT_\"/>\n\n    <path d=\"M0,0 L0,25 L15,25 A15 12.5 0 0 0 15,0 Z\" fill=\"#ffffff\" class=\"$cell_id\"/>\n    <circle cx=\"34\" cy=\"12.5\" r=\"3\" fill=\"#ffffff\" class=\"$cell_id\"/>\n\n    <g s:x=\"0\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"0\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"36\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n\n  <!-- or -->\n  <g s:type=\"or\" transform=\"translate(250,50)\" s:width=\"30\" s:height=\"25\">\n    <s:alias val=\"$or\"/>\n    <s:alias val=\"$logic_or\"/>\n    <s:alias val=\"$_OR_\"/>\n\n    <path d=\"M0,25 L0,25 L15,25 A15 12.5 0 0 0 15,0 L0,0 A30 25 0 0 1 0,25 Z\" fill=\"#ffffff\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"30\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n  <g s:type=\"reduce_nor\" transform=\"translate(250, 100)\" s:width=\"33\" s:height=\"25\">\n    <s:alias val=\"$nor\"/>\n    <s:alias val=\"$reduce_nor\"/>\n    <s:alias val=\"$_NOR_\"/>\n    <s:alias val=\"$_ORNOT_\"/>\n\n    <path d=\"M0,25 L0,25 L15,25 A15 12.5 0 0 0 15,0 L0,0 A30 25 0 0 1 0,25 Z\" fill=\"#ffffff\" class=\"$cell_id\"/>\n    <circle cx=\"34\" cy=\"12.5\" r=\"3\" fill=\"#ffffff\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"36\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n\n  <!--xor -->\n  <g s:type=\"reduce_xor\" transform=\"translate(350, 50)\" s:width=\"33\" s:height=\"25\">\n    <s:alias val=\"$xor\"/>\n    <s:alias val=\"$reduce_xor\"/>\n    <s:alias val=\"$_XOR_\"/>\n\n    <path d=\"M3,0 A30 25 0 0 1 3,25 A30 25 0 0 0 33,12.5 A30 25 0 0 0 3,0\" fill=\"#ffffff\" class=\"$cell_id\"/>\n    <path d=\"M0,0 A30 25 0 0 1 0,25\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"33\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n  <g s:type=\"reduce_nxor\" transform=\"translate(350, 100)\" s:width=\"33\" s:height=\"25\">\n    <s:alias val=\"$xnor\"/>\n    <s:alias val=\"$reduce_xnor\"/>\n    <s:alias val=\"$_XNOR_\"/>\n\n    <path d=\"M3,0 A30 25 0 0 1 3,25 A30 25 0 0 0 33,12.5 A30 25 0 0 0 3,0\" fill=\"#ffffff\" class=\"$cell_id\"/>\n    <path d=\"M0,0 A30 25 0 0 1 0,25\" class=\"$cell_id\"/>\n    <circle cx=\"36\" cy=\"12.5\" r=\"3\" fill=\"#ffffff\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"38\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n\n  <!--buffer -->\n  <g s:type=\"not\" transform=\"translate(450,100)\" s:width=\"30\" s:height=\"20\">\n    <s:alias val=\"$_NOT_\"/>\n    <s:alias val=\"$not\"/>\n    <s:alias val=\"$logic_not\"/>\n\n    <path d=\"M0,0 L0,20 L20,10 Z\" fill=\"#ffffff\" class=\"$cell_id\"/>\n    <circle cx=\"24\" cy=\"10\" r=\"3\" fill=\"#ffffff\" class=\"$cell_id\"/>\n\n    <g s:x=\"-1\" s:y=\"10\" s:pid=\"A\"/>\n    <g s:x=\"27\" s:y=\"10\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"add\" transform=\"translate(50, 150)\" s:width=\"25\" s:height=\"25\">\n    <s:alias val=\"$add\"/>\n\n    <circle r=\"12.5\" cx=\"12.5\" cy=\"12.5\"  fill=\"#ffffff\" class=\"$cell_id\"/>\n    <line x1=\"7.5\" x2=\"17.5\" y1=\"12.5\" y2=\"12.5\" class=\"$cell_id\"/>\n    <line x1=\"12.5\" x2=\"12.5\" y1=\"7.5\" y2=\"17.5\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"26\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"sub\" transform=\"translate(150,150)\" s:width=\"25\" s:height=\"25\">\n    <s:alias val=\"$sub\"/>\n\n    <circle r=\"12.5\" cx=\"12.5\" cy=\"12.5\"  fill=\"#ffffff\" class=\"$cell_id\"/>\n    <line x1=\"7.5\" x2=\"17.5\" y1=\"12.5\" y2=\"12.5\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"25\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n  <g s:type=\"eq\" transform=\"translate(250,150)\" s:width=\"25\" s:height=\"25\">\n    <s:alias val=\"$eq\"/>\n\n    <circle r=\"12.5\" cx=\"12.5\" cy=\"12.5\"  fill=\"#ffffff\" class=\"$cell_id\"/>\n    <line x1=\"7.5\" x2=\"17.5\" y1=\"10\" y2=\"10\" class=\"$cell_id\"/>\n    <line x1=\"7.5\" x2=\"17.5\" y1=\"15\" y2=\"15\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"25\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"dff\" transform=\"translate(350,150)\" s:width=\"30\" s:height=\"40\">\n    <s:alias val=\"$dff\"/>\n    <s:alias val=\"$_DFF_\"/>\n    <s:alias val=\"$_DFF_P_\"/>\n\n    <s:alias val=\"dff-bus\"/>\n    <s:alias val=\"$dff-bus\"/>\n    <s:alias val=\"$_DFF_-bus\"/>\n    <s:alias val=\"$_DFF_P_-bus\"/>\n\n    <rect width=\"30\" height=\"40\" x=\"0\" y=\"0\" fill=\"#ffffff\" class=\"$cell_id\"/>\n    <path d=\"M0,35 L5,30 L0,25\" class=\"$cell_id\"/>\n\n    <g s:x=\"31\" s:y=\"10\" s:pid=\"Q\"/>\n    <g s:x=\"-1\" s:y=\"30\" s:pid=\"CLK\"/>\n    <g s:x=\"-1\" s:y=\"30\" s:pid=\"C\"/>\n    <g s:x=\"-1\" s:y=\"10\" s:pid=\"D\"/>\n  </g>\n\n  <g s:type=\"dffn\" transform=\"translate(450,150)\" s:width=\"30\" s:height=\"40\">\n    <s:alias val=\"$_DFF_N_\"/>\n\n    <s:alias val=\"dffn-bus\"/>\n    <s:alias val=\"$_DFF_N_-bus\"/>\n\n    <rect width=\"30\" height=\"40\" x=\"0\" y=\"0\" fill=\"#ffffff\" class=\"$cell_id\"/>\n    <path d=\"M0,35 L5,30 L0,25\" class=\"$cell_id\"/>\n    <circle cx=\"-3\" cy=\"30\" r=\"3\" fill=\"#ffffff\" class=\"$cell_id\"/>\n\n    <g s:x=\"30\" s:y=\"10\" s:pid=\"Q\"/>\n    <g s:x=\"-6\" s:y=\"30\" s:pid=\"CLK\"/>\n    <g s:x=\"-6\" s:y=\"30\" s:pid=\"C\"/>\n    <g s:x=\"0\" s:y=\"10\" s:pid=\"D\"/>\n  </g>\n\n  <g s:type=\"lt\" transform=\"translate(50,200)\" s:width=\"25\" s:height=\"25\">\n    <s:alias val=\"$lt\"/>\n\n    <circle r=\"12.5\" cx=\"12.5\" cy=\"12.5\" fill=\"#ffffff\" class=\"$cell_id\"/>\n    <line x1=\"6\" x2=\"17\" y1=\"12\"  y2=\"7\" class=\"$cell_id\"/>\n    <line x1=\"6\" x2=\"17\" y1=\"12\" y2=\"17\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"25\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"le\" transform=\"translate(150,200)\" s:width=\"25\" s:height=\"25\">\n    <s:alias val=\"$le\"/>\n\n    <circle r=\"12.5\" cx=\"12.5\" cy=\"12.5\" fill=\"#ffffff\" class=\"$cell_id\"/>\n    <line x1=\"6\" x2=\"17\" y1=\"11\"  y2=\"6\" class=\"$cell_id\"/>\n    <line x1=\"6\" x2=\"17\" y1=\"11\" y2=\"16\" class=\"$cell_id\"/>\n    <line x1=\"6\" x2=\"17\" y1=\"14\" y2=\"19\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"25\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"ge\" transform=\"translate(250,200)\" s:width=\"25\" s:height=\"25\">\n    <s:alias val=\"$ge\"/>\n\n    <circle r=\"12\" cx=\"12\" cy=\"12\" fill=\"#ffffff\" class=\"$cell_id\"/>\n    <line x1=\"8\" x2=\"19\"  y1=\"6\" y2=\"11\" class=\"$cell_id\"/>\n    <line x1=\"8\" x2=\"19\" y1=\"16\" y2=\"11\" class=\"$cell_id\"/>\n    <line x1=\"8\" x2=\"19\" y1=\"19\" y2=\"14\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"25\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"gt\" transform=\"translate(350,200)\" s:width=\"25\" s:height=\"25\">\n    <s:alias val=\"$gt\"/>\n\n    <circle r=\"12\" cx=\"12\" cy=\"12\" fill=\"#ffffff\" class=\"$cell_id\"/>\n    <line x1=\"8\" x2=\"19\"  y1=\"7\" y2=\"12\" class=\"$cell_id\"/>\n    <line x1=\"8\" x2=\"19\" y1=\"17\" y2=\"12\" class=\"$cell_id\"/>\n\n    <g s:x=\"2\" s:y=\"5\" s:pid=\"A\"/>\n    <g s:x=\"2\" s:y=\"20\" s:pid=\"B\"/>\n    <g s:x=\"25\" s:y=\"12.5\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"inputExt\" transform=\"translate(50,250)\" s:width=\"30\" s:height=\"20\">\n    <text x=\"15\" y=\"-4\" class=\"nodelabel $cell_id\" s:attribute=\"ref\">input</text>\n    <s:alias val=\"$_inputExt_\"/>\n    <path d=\"M0,0 L0,20 L15,20 L30,10 L15,0 Z\" fill=\"#ffffff\" class=\"$cell_id\"/>\n    <g s:x=\"30\" s:y=\"10\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"constant\" transform=\"translate(150,250)\" s:width=\"30\" s:height=\"20\">\n    <text x=\"15\" y=\"-4\" class=\"nodelabel $cell_id\" s:attribute=\"ref\">constant</text>\n\n    <s:alias val=\"$_constant_\"/>\n    <rect width=\"30\" height=\"20\" fill=\"#ffffff\" class=\"$cell_id\"/>\n\n    <g s:x=\"31\" s:y=\"10\" s:pid=\"Y\"/>\n  </g>\n\n  <g s:type=\"outputExt\" transform=\"translate(250,250)\" s:width=\"30\" s:height=\"20\">\n    <text x=\"15\" y=\"-4\" class=\"nodelabel $cell_id\" s:attribute=\"ref\">output</text>\n    <s:alias val=\"$_outputExt_\"/>\n    <path d=\"M30,0 L30,20 L15,20 L0,10 L15,0 Z\" fill=\"#ffffff\" class=\"$cell_id\"/>\n\n    <g s:x=\"0\" s:y=\"10\" s:pid=\"A\"/>\n  </g>\n\n  <g s:type=\"split\" transform=\"translate(350,250)\" s:width=\"5\" s:height=\"40\">\n    <rect width=\"5\" height=\"40\" class=\"splitjoinBody\" s:generic=\"body\"/>\n    <s:alias val=\"$_split_\"/>\n\n    <g s:x=\"-1\" s:y=\"20\" s:pid=\"in\"/>\n    <g transform=\"translate(5, 10)\" s:x=\"5\" s:y=\"10\" s:pid=\"out0\">\n      <text x=\"5\" y=\"-4\">hi:lo</text>\n    </g>\n    <g transform=\"translate(5, 30)\" s:x=\"5\" s:y=\"30\" s:pid=\"out1\">\n      <text x=\"5\" y=\"-4\">hi:lo</text>\n    </g>\n  </g>\n\n  <g s:type=\"join\" transform=\"translate(450,250)\" s:width=\"5\" s:height=\"40\">\n    <rect width=\"5\" height=\"40\" class=\"splitjoinBody\" s:generic=\"body\"/>\n    <s:alias val=\"$_join_\"/>\n    <g s:x=\"5\" s:y=\"20\"  s:pid=\"out\"/>\n    <g transform=\"translate(0, 10)\" s:x=\"-1\" s:y=\"10\" s:pid=\"in0\">\n      <text x=\"-3\" y=\"-4\" class=\"inputPortLabel\">hi:lo</text>\n    </g>\n    <g transform=\"translate(0, 30)\" s:x=\"-1\" s:y=\"30\" s:pid=\"in1\">\n      <text x=\"-3\" y=\"-4\" class=\"inputPortLabel\">hi:lo</text>\n    </g>\n  </g>\n\n  <g s:type=\"generic\" transform=\"translate(550,250)\" s:width=\"30\" s:height=\"40\">\n\n    <text x=\"15\" y=\"-4\" class=\"nodelabel $cell_id\" s:attribute=\"ref\">generic</text>\n    <rect width=\"30\" height=\"40\" s:generic=\"body\" fill=\"#ffffff\" rx=\"0\" class=\"$cell_id\"/>\n\n    <g transform=\"translate(30, 10)\" s:x=\"30\" s:y=\"10\" s:pid=\"out0\">\n      <text x=\"5\" y=\"-4\" style=\"fill:#000; stroke:none\" class=\"$cell_id\">out0</text>\n    </g>\n    <g transform=\"translate(30, 30)\" s:x=\"30\" s:y=\"30\" s:pid=\"out1\">\n      <text x=\"5\" y=\"-4\" style=\"fill:#000;stroke:none\" class=\"$cell_id\">out1</text>\n    </g>\n    <g transform=\"translate(0, 10)\" s:x=\"0\" s:y=\"10\" s:pid=\"in0\">\n      <text x=\"-3\" y=\"-4\" class=\"inputPortLabel $cell_id\">in0</text>\n    </g>\n    <g transform=\"translate(0, 30)\" s:x=\"0\" s:y=\"30\" s:pid=\"in1\">\n      <text x=\"-3\" y=\"-4\" class=\"inputPortLabel $cell_id\">in1</text>\n    </g>\n  </g>\n\n  <g s:type=\"sub_odd\" transform=\"translate(150,300)\" s:width=\"30\" s:height=\"40\">\n    <text x=\"15\" y=\"-4\" class=\"nodelabel $cell_id\" s:attribute=\"ref\">sub_odd</text>\n    <rect width=\"30\" height=\"40\" s:generic=\"body\" fill=\"#e9e9e9\" rx=\"4\" class=\"$cell_id\"/>\n\n    <g transform=\"translate(30, 10)\" s:x=\"30\" s:y=\"10\" s:pid=\"out0\">\n      <text x=\"5\" y=\"-4\" style=\"fill:#000; stroke:none\" class=\"$cell_id\">out0</text>\n    </g>\n    <g transform=\"translate(30, 30)\" s:x=\"30\" s:y=\"30\" s:pid=\"out1\">\n      <text x=\"5\" y=\"-4\" style=\"fill:#000;stroke:none\" class=\"$cell_id\">out1</text>\n    </g>\n    <g transform=\"translate(0, 10)\" s:x=\"0\" s:y=\"10\" s:pid=\"in0\">\n      <text x=\"-3\" y=\"-4\" class=\"inputPortLabel $cell_id\">in0</text>\n    </g>\n    <g transform=\"translate(0, 30)\" s:x=\"0\" s:y=\"30\" s:pid=\"in1\">\n      <text x=\"-3\" y=\"-4\" class=\"inputPortLabel $cell_id\">in1</text>\n    </g>\n  </g>\n\n  <g s:type=\"sub_even\" transform=\"translate(250,300)\" s:width=\"30\" s:height=\"40\">\n    <text x=\"15\" y=\"-4\" class=\"nodelabel $cell_id\" s:attribute=\"ref\">sub_even</text>\n    <rect width=\"30\" height=\"40\" s:generic=\"body\" fill=\"#ffffff\" rx=\"4\" class=\"$cell_id\"/>\n\n    <g transform=\"translate(30, 10)\" s:x=\"30\" s:y=\"10\" s:pid=\"out0\">\n      <text x=\"5\" y=\"-4\" style=\"fill:#000; stroke:none\" class=\"$cell_id\">out0</text>\n    </g>\n    <g transform=\"translate(30, 30)\" s:x=\"30\" s:y=\"30\" s:pid=\"out1\">\n      <text x=\"5\" y=\"-4\" style=\"fill:#000;stroke:none\" class=\"$cell_id\">out1</text>\n    </g>\n    <g transform=\"translate(0, 10)\" s:x=\"0\" s:y=\"10\" s:pid=\"in0\">\n      <text x=\"-3\" y=\"-4\" class=\"inputPortLabel $cell_id\">in0</text>\n    </g>\n    <g transform=\"translate(0, 30)\" s:x=\"0\" s:y=\"30\" s:pid=\"in1\">\n      <text x=\"-3\" y=\"-4\" class=\"inputPortLabel $cell_id\">in1</text>\n    </g>\n  </g>\n\n</svg>\n";
+const analog = "<svg xmlns=\"http://www.w3.org/2000/svg\"\n     xmlns:xlink=\"http://www.w3.org/1999/xlink\"\n     xmlns:s=\"https://github.com/nturley/netlistsvg\">\n  <s:properties\n    constants=\"false\"\n    splitsAndJoins=\"false\"\n    genericsLaterals=\"true\">\n    <s:layoutEngine\n        org.eclipse.elk.layered.spacing.nodeNodeBetweenLayers=\"5\"\n        org.eclipse.elk.layered.compaction.postCompaction.strategy=\"4\"\n        org.eclipse.elk.spacing.nodeNode= \"35\"\n        org.eclipse.elk.direction=\"DOWN\"/>\n  </s:properties>\n<style>\nsvg {\n  stroke: #000;\n  fill: none;\n}\ntext {\n  fill: #000;\n  stroke: none;\n  font-size: 10px;\n  font-weight: bold;\n  font-family: \"Courier New\", monospace;\n}\n.nodelabel {\n  text-anchor: middle;\n}\n.inputPortLabel {\n  text-anchor: end;\n}\n.splitjoinBody {\n  fill: #000;\n}\n.symbol {\n  stroke-linejoin: round;\n  stroke-linecap: round;\n  stroke-width: 2;\n}\n.detail {\n  stroke-linejoin: round;\n  stroke-linecap: round;\n  fill: #000;\n}\n</style>\n\n<!-- power -->\n<g s:type=\"vcc\" s:width=\"20\" s:height=\"30\" transform=\"translate(5,20)\">\n  <s:alias val=\"vcc\" />\n  <text x=\"10\" y=\"-4\" class=\"nodelabel $cell_id\" s:attribute=\"name\">name</text>\n  <path d=\"M0,0 H20 L10,15 Z M10,15 V30\" fill=\"#ffffff\" class=\"$cell_id\"/>\n  <g s:x=\"10\" s:y=\"30\" s:pid=\"A\" s:position=\"bottom\"/>\n</g>\n\n<g s:type=\"vee\" s:width=\"20\" s:height=\"30\" transform=\"translate(40,35)\">\n\t  <s:alias val=\"vee\" />\n\t  <text x=\"10\" y=\"10\" class=\"nodelabel $cell_id\" s:attribute=\"name\">name</text>\n\t  <path d=\"M0,0 H20 L10,-15 Z M10,-15 V-30\" fill=\"#ffffff\" class=\"$cell_id\"/>\n\t  <g s:x=\"10\" s:y=\"-30\" s:pid=\"A\" s:position=\"top\"/>\n\t</g>\n\n<g s:type=\"gnd\" s:width=\"20\" s:height=\"30\" transform=\"translate(80,35)\">\n  <s:alias val=\"gnd\"/>\n  <text x=\"30\" y=\"20\" class=\"nodelabel $cell_id\" s:attribute=\"name\">name</text>\n  <path d=\"M0,0 H20 M3,5 H17 M7,10 H13 M10,0 V-15\" class=\"$cell_id\"/>\n  <g s:x=\"10\" s:y=\"-15\" s:pid=\"A\" s:position=\"top\"/>\n</g>\n<!-- power -->\n\n<!-- signal -->\n<g s:type=\"inputExt\" s:width=\"30\" s:height=\"20\" transform=\"translate(5,70)\">\n  <text x=\"15\" y=\"-4\" class=\"$cell_id\" s:attribute=\"ref\">input</text>\n  <s:alias val=\"$_inputExt_\"/>\n  <path d=\"M0,0 V20 H15 L30,10 15,0 Z\" fill=\"#ffffff\" class=\"$cell_id\"/>\n  <g s:x=\"30\" s:y=\"10\" s:pid=\"Y\" s:position=\"right\"/>\n</g>\n\n<g s:type=\"outputExt\" s:width=\"30\" s:height=\"20\" transform=\"translate(60,70)\">\n  <text x=\"15\" y=\"-4\" class=\"$cell_id\" s:attribute=\"ref\">output</text>\n  <s:alias val=\"$_outputExt_\"/>\n  <path d=\"M30,0 V20 H15 L0,10 15,0 Z\" fill=\"#ffffff\" class=\"$cell_id\"/>\n  <g s:x=\"0\" s:y=\"10\" s:pid=\"A\" s:position=\"left\"/>\n</g>\n<!-- signal -->\n\n<!-- passives -->\n<g s:type=\"resistor_h\" s:width=\"50\" s:height=\"10\" transform=\"translate(5,110)\">\n  <s:alias val=\"r_h\"/>\n  <text class=\"nodelabel $cell_id\" x=\"25\" y=\"-5\" s:attribute=\"ref\">X1</text>\n  <text class=\"nodelabel $cell_id\" x=\"25\" y=\"20\" s:attribute=\"value\">Xk</text>\n  <path d=\"M10,0 H40 V10 H10 Z\" fill=\"#ffffff\" class=\"symbol $cell_id\"/>\n  <path d=\"M0,5 H10 M40,5 H50\" class=\"connect $cell_id\"/>\n  <g s:x=\"0\" s:y=\"5\" s:pid=\"A\" s:position=\"left\"/>\n  <g s:x=\"50\" s:y=\"5\" s:pid=\"B\" s:position=\"right\"/>\n</g>\n\n<g s:type=\"resistor_v\" s:width=\"10\" s:height=\"50\" transform=\"translate(25,130)\">\n  <s:alias val=\"r_v\"/>\n  <text x=\"15\"  y=\"15\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <text x=\"15\" y=\"30\" s:attribute=\"value\" class=\"$cell_id\" >Xk</text>\n  <path d=\"M0,10 V40 H10 V10 Z\" fill=\"#ffffff\" class=\"symbol $cell_id\"/>\n  <path d=\"M5,0 V10 M5,40 V50\" class=\"connect $cell_id\"/>\n  <g s:x=\"5\" s:y=\"0\" s:pid=\"A\" s:position=\"top\"/>\n  <g s:x=\"5\" s:y=\"50\" s:pid=\"B\" s:position=\"bottom\"/>\n</g>\n\n<g s:type=\"capacitor_h\" s:width=\"50\" s:height=\"30\" transform=\"translate(60,100)\">\n  <s:alias val=\"c_h\"/>\n  <text x=\"35\" y=\"5\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <text x=\"35\" y=\"30\" s:attribute=\"value\" class=\"$cell_id\">Xu</text>\n  <path d=\"M20,0 V30 M30,0 V30\" class=\"symbol $cell_id\"/>\n  <path d=\"M0,15 H20 M30,15 H50\" class=\"connect $cell_id\"/>\n  <g s:x=\"0\" s:y=\"15\" s:pid=\"A\" s:position=\"left\"/>\n  <g s:x=\"50\" s:y=\"15\" s:pid=\"B\" s:position=\"right\"/>\n</g>\n\n<g s:type=\"capacitor_v\" s:width=\"30\" s:height=\"50\" transform=\"translate(70,130)\">\n  <s:alias val=\"c_v\"/>\n  <text x=\"25\" y=\"10\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <text x=\"25\" y=\"45\" s:attribute=\"value\" class=\"$cell_id\">Xu</text>\n  <path d=\"M0,20 H30 M0,30 H30\" class=\"symbol $cell_id\"/>\n  <path d=\"M15,0 V20 M15,30 V50\" class=\"connect $cell_id\"/>\n  <g s:x=\"15\" s:y=\"0\" s:pid=\"A\" s:position=\"top\"/>\n  <g s:x=\"15\" s:y=\"50\" s:pid=\"B\" s:position=\"bottom\"/>\n</g>\n\n<g s:type=\"inductor_h\" s:width=\"50\" s:height=\"10\" transform=\"translate(115,110)\">\n  <s:alias val=\"l_h\"/>\n  <text class=\"nodelabel $cell_id\" x=\"25\" y=\"-5\" s:attribute=\"ref\">X1</text>\n  <text class=\"nodelabel $cell_id\" x=\"25\" y=\"20\" s:attribute=\"value\">XpF</text>\n  <path d=\"M5,5 A5,5 0 0 1 15,5 A5,5 0 0 1 25,5 A5,5 0 0 1 35,5 A5,5 0 0 1 45,5\" class=\"$cell_id\"/>\n  <path d=\"M0,5 H5 M45,5 H50\" class=\"connect $cell_id\"/>\n  <g s:x=\"0\" s:y=\"5\" s:pid=\"A\" s:position=\"left\"/>\n  <g s:x=\"50\" s:y=\"5\" s:pid=\"B\" s:position=\"right\"/>\n</g>\n\n<g s:type=\"inductor_v\" s:width=\"10\" s:height=\"50\" transform=\"translate(135,130)\">\n  <s:alias val=\"l_v\"/>\n  <text x=\"15\" y=\"15\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <text x=\"15\" y=\"35\" s:attribute=\"value\" class=\"$cell_id\">XpF</text>\n  <path d=\"M5,5 A5,5 0 0 1 5,15 A5,5 0 0 1 5,25 A5,5 0 0 1 5,35 A5,5 0 0 1 5,45\" class=\"$cell_id\"/>\n  <path d=\"M5,0 V5 M5,45 V50\" class=\"connect $cell_id\"/>\n  <g s:x=\"5\" s:y=\"0\" s:pid=\"A\" s:position=\"top\"/>\n  <g s:x=\"5\" s:y=\"50\" s:pid=\"B\" s:position=\"bottom\"/>\n</g>\n<!-- passives -->\n\n<!-- sources -->\n<g s:type=\"voltage_source\" s:width=\"32\" s:height=\"52\" transform=\"translate(20,180)\">\n  <s:alias val=\"v\"/>\n  <text x=\"35\" y=\"20\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <text x=\"35\" y=\"35\" s:attribute=\"value\" class=\"$cell_id\">XV</text>\n  <circle cx=\"16\" cy=\"26\" r=\"16\" fill=\"#ffffff\" class=\"symbol $cell_id\"/>\n  <path d=\"M16,10 V42\" class=\"detail $cell_id\"/>\n  <path d=\"M16,0 V10 M16,42 V52\" class=\"connect $cell_id\"/>\n  <g s:x=\"16\" s:y=\"0\" s:pid=\"+\" s:position=\"top\"/>\n  <g s:x=\"16\" s:y=\"52\" s:pid=\"-\" s:position=\"bottom\"/>\n</g>\n\n<g s:type=\"current_source\" s:width=\"32\" s:height=\"52\" transform=\"translate(75,180)\">\n  <s:alias val=\"i\"/>\n  <text x=\"35\" y=\"20\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <text x=\"35\" y=\"35\" s:attribute=\"value\" class=\"$cell_id\">XA</text>\n  <circle cx=\"16\" cy=\"26\" r=\"16\" fill=\"#ffffff\" class=\"symbol $cell_id\"/>\n  <path d=\"M0,26 H32\" class=\"detail $cell_id\"/>\n  <path d=\"M16,0 V10 M16,42 V52\" class=\"connect $cell_id\"/>\n  <g s:x=\"16\" s:y=\"0\" s:pid=\"+\" s:position=\"top\"/>\n  <g s:x=\"16\" s:y=\"52\" s:pid=\"-\" s:position=\"bottom\"/>\n</g>\n<!-- sources -->\n\n<!-- diodes -->\n<g s:type=\"diode_h\" s:width=\"50\" s:height=\"20\" transform=\"translate(5,250)\">\n  <s:alias val=\"d_h\"/>\n  <text class=\"nodelabel $cell_id\" x=\"25\" y=\"-5\" s:attribute=\"ref\">X1</text>\n  <path d=\"M15,0 V20 L35,10 Z M35,0 V20\" fill=\"#ffffff\" class=\"symbol $cell_id\"/>\n  <path d=\"M0,10 H15 M35,10 H50\" class=\"connect $cell_id\"/>\n  <g s:x=\"0\" s:y=\"10\" s:pid=\"+\" s:position=\"left\"/>\n  <g s:x=\"50\" s:y=\"10\" s:pid=\"-\" s:position=\"right\"/>\n</g>\n\n<g s:type=\"diode_v\" s:width=\"20\" s:height=\"50\" transform=\"translate(20,280)\">\n  <s:alias val=\"d_v\"/>\n  <text x=\"25\" y=\"25\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <path d=\"M0,15 H20 L10,35 Z M0,35 H20\" fill=\"#ffffff\" class=\"symbol $cell_id\"/>\n  <path d=\"M10,0 V15 M10,35 V50\" class=\"connect $cell_id\"/>\n  <g s:x=\"10\" s:y=\"0\" s:pid=\"+\" s:position=\"top\"/>\n  <g s:x=\"10\" s:y=\"50\" s:pid=\"-\" s:position=\"bottom\"/>\n</g>\n\n<g s:type=\"diode_schottky_h\" s:width=\"50\" s:height=\"20\" transform=\"translate(60,250)\">\n  <s:alias val=\"d_sk_h\"/>\n  <text class=\"nodelabel $cell_id\" x=\"25\" y=\"-5\" s:attribute=\"ref\">X1</text>\n  <path d=\"M15,0 V20 L35,10 Z M35,0 V20\" fill=\"#ffffff\" class=\"symbol $cell_id\"/>\n  <path d=\"M0,10 H15 M35,10 H50\" class=\"connect $cell_id\"/>\n  <!-- schottky -->\n  <path d=\"M35,0 H40 M35,20 H30\" class=\"symbol $cell_id\"/>\n  <g s:x=\"0\" s:y=\"10\" s:pid=\"+\" s:position=\"left\"/>\n  <g s:x=\"50\" s:y=\"10\" s:pid=\"-\" s:position=\"right\"/>\n</g>\n\n<g s:type=\"diode_schottky_v\" s:width=\"20\" s:height=\"50\" transform=\"translate(75,280)\">\n  <s:alias val=\"d_sk_v\"/>\n  <text x=\"25\" y=\"25\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <path d=\"M0,15 H20 L10,35 Z M0,35 H20\" fill=\"#ffffff\" class=\"symbol $cell_id\"/>\n  <path d=\"M10,0 V15 M10,35 V50\" class=\"connect $cell_id\"/>\n  <!-- schottky -->\n  <path d=\"M0,35 V40 M20,35 V30\" class=\"symbol $cell_id\"/>\n  <g s:x=\"10\" s:y=\"0\" s:pid=\"+\" s:position=\"top\"/>\n  <g s:x=\"10\" s:y=\"50\" s:pid=\"-\" s:position=\"bottom\"/>\n</g>\n\n<g s:type=\"diode_led_h\" s:width=\"50\" s:height=\"20\" transform=\"translate(115,250)\">\n  <s:alias val=\"d_led_h\"/>\n  <text class=\"nodelabel $cell_id\" x=\"10\" y=\"-5\" s:attribute=\"ref\">X1</text>\n  <path d=\"M15,0 V20 L35,10 Z M35,0 V20\" fill=\"#ffffff\" class=\"symbol $cell_id\"/>\n  <path d=\"M0,10 H15 M35,10 H50\" class=\"connect $cell_id\"/>\n  <!-- led -->\n  <path d=\"m20,-5 7,-7\" class=\"detail $cell_id\"/>\n  <path d=\"m24,-12 6,-3 -3,6 z\" class=\"detail $cell_id\"/>\n  <path d=\"m25,0 7,-7\" class=\"detail $cell_id\"/>\n  <path d=\"m29,-7 6,-3 -3,6 z\" class=\"detail $cell_id\"/>\n  <g s:x=\"0\" s:y=\"10\" s:pid=\"+\" s:position=\"top\"/>\n  <g s:x=\"50\" s:y=\"10\" s:pid=\"-\" s:position=\"bottom\"/>\n</g>\n\n<g s:type=\"diode_led_v\" s:width=\"20\" s:height=\"50\" transform=\"translate(130,280)\">\n  <s:alias val=\"d_led_v\"/>\n  <text x=\"25\" y=\"25\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <path d=\"M0,15 H20 L10,35 Z M0,35 H20\" fill=\"#ffffff\" class=\"symbol $cell_id\"/>\n  <path d=\"M10,0 V15 M10,35 V50\" class=\"connect $cell_id\"/>\n  <!-- led -->\n  <path d=\"m-5,20 -7,7\" class=\"detail $cell_id\"/>\n  <path d=\"m-12,24 -3,6 6,-3 z\" class=\"detail $cell_id\"/>\n  <path d=\"m0,25 -7,7\" class=\"detail $cell_id\"/>\n  <path d=\"m-7,29 -3,6 6,-3 z\" class=\"detail $cell_id\"/>\n  <g s:x=\"10\" s:y=\"0\" s:pid=\"+\" s:position=\"top\"/>\n  <g s:x=\"10\" s:y=\"50\" s:pid=\"-\" s:position=\"bottom\"/>\n</g>\n<!-- diodes -->\n\n<!-- transistors -->\n<g s:type=\"transistor_npn\" s:width=\"32\" s:height=\"32\" transform=\"translate(15,350)\">\n  <s:alias val=\"q_npn\"/>\n  <text x=\"35\" y=\"20\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <circle r=\"16\" cx=\"16\" cy=\"16\" fill=\"#ffffff\" class=\"symbol $cell_id\"/>\n  <path d=\"M0,16 H12 M12,6 V26\" class=\"detail $cell_id\"/>\n  <path d=\"m12,10 11,-8\" class=\"detail $cell_id\"/>\n  <path d=\"m12,21 11,8\" class=\"detail $cell_id\"/>\n  <!-- npn -->\n  <path d=\"m23,29 -6,-1 3,-5 z\" style=\"fill:#000000\" class=\"$cell_id\"/>\n  <g s:x=\"22\" s:y=\"2\" s:pid=\"C\" s:position=\"top\"/>\n  <g s:x=\"0\" s:y=\"16\" s:pid=\"B\" s:position=\"left\"/>\n  <g s:x=\"23\" s:y=\"29\" s:pid=\"E\" s:position=\"bottom\"/>\n</g>\n\n<g s:type=\"transistor_pnp\" s:width=\"32\" s:height=\"32\" transform=\"translate(85,350)\">\n  <s:alias val=\"q_pnp\"/>\n  <text x=\"35\" y=\"20\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <circle r=\"16\" cx=\"16\" cy=\"16\" fill=\"#ffffff\" class=\"symbol $cell_id\"/>\n  <path d=\"M0,16 H12 M12,6 V26\" class=\"detail $cell_id\"/>\n  <path d=\"m12,10 11,-8\" class=\"detail $cell_id\"/>\n  <path d=\"m12,21 11,8\" class=\"detail $cell_id\"/>\n  <!-- pnp -->\n  <path d=\"m14,9 6,-1 -3,-5 z\" style=\"fill:#000000\" class=\"$cell_id\"/>\n  <g s:x=\"22\" s:y=\"2\" s:pid=\"C\" s:position=\"top\"/>\n  <g s:x=\"0\" s:y=\"16\" s:pid=\"B\" s:position=\"left\"/>\n  <g s:x=\"23\" s:y=\"29\" s:pid=\"E\" s:position=\"bottom\"/>\n</g>\n<!-- transistors -->\n\n<!-- builtin -->\n<g s:type=\"generic\" s:width=\"30\" s:height=\"40\" transform=\"translate(150, 400)\">\n  <text x=\"15\" y=\"-4\" class=\"nodelabel $cell_id\" s:attribute=\"ref\">generic</text>\n  <rect width=\"30\" height=\"40\" x=\"0\" y=\"0\" s:generic=\"body\" fill=\"#ffffff\" rx=\"0\" class=\"$cell_id\"/>\n  <g transform=\"translate(30,10)\"\n     s:x=\"30\" s:y=\"10\" s:pid=\"out0\" s:position=\"right\">\n    <text x=\"5\" y=\"-4\" class=\"$cell_id\">out0</text>\n  </g>\n  <g transform=\"translate(30,30)\"\n     s:x=\"30\" s:y=\"30\" s:pid=\"out1\" s:position=\"right\">\n    <text x=\"5\" y=\"-4\" class=\"$cell_id\">out1</text>\n  </g>\n  <g transform=\"translate(0,10)\"\n     s:x=\"0\" s:y=\"10\" s:pid=\"in0\" s:position=\"left\">\n      <text x=\"-3\" y=\"-4\" class=\"inputPortLabel $cell_id\">in0</text>\n  </g>\n  <g transform=\"translate(0,30)\"\n     s:x=\"0\" s:y=\"30\" s:pid=\"in1\" s:position=\"left\">\n    <text x=\"-3\" y=\"-4\" class=\"inputPortLabel $cell_id\">in1</text>\n  </g>\n</g>\n<!-- builtin -->\n\n<!-- misc -->\n<g s:type=\"opamp\" s:width=\"60\" s:height=\"40\" transform=\"translate(20,450)\">\n  <s:alias val=\"op\"/>\n  <text x=\"40\" y=\"35\" s:attribute=\"ref\" class=\"$cell_id\">X1</text>\n  <path d=\"M10,0 V40 L50,20 Z\" fill=\"#ffffff\" class=\"symbol $cell_id\"/>\n  <path d=\"M0,10 H10 M0,30 H10 M50,20 H60 M30,0 V10 M30,40 V30\" class=\"connect $cell_id\"/>\n  <path d=\"m15,10 5,0 m-2.5,-2.5 0,5\" class=\"detail $cell_id\"/>\n  <path d=\"m15,30 5,0\" class=\"detail $cell_id\"/>\n  <g s:x=\"0\" s:y=\"10\" s:pid=\"+\" s:position=\"left\"/>\n  <g s:x=\"0\" s:y=\"30\" s:pid=\"-\" s:position=\"left\"/>\n  <g s:x=\"60\" s:y=\"20\" s:pid=\"OUT\" s:position=\"right\"/>\n  <g s:x=\"30\" s:y=\"0\" s:pid=\"VCC\" s:position=\"top\"/>\n  <g s:x=\"30\" s:y=\"40\" s:pid=\"VEE\" s:position=\"bottom\"/>\n</g>\n\n<g s:type=\"xtal\" s:width=\"40\" s:height=\"30\" transform=\"translate(90,450)\">\n  <s:alias val=\"xtal\"/>\n  <text class=\"nodelabel $cell_id\" x=\"20\" y=\"45\" s:attribute=\"ref\">X1</text>\n  <rect x=\"15\" y=\"0\" width=\"10\" height=\"30\" fill=\"#ffffff\" class=\"symbol $cell_id\" />\n  <path d=\"M0,15 H10 M10,5 V25 M30,5 V25 M30,15 H40\" class=\"$cell_id\"/>\n  <g s:x=\"0\" s:y=\"15\" s:pid=\"A\" s:position=\"left\"/>\n  <g s:x=\"40\" s:y=\"15\" s:pid=\"B\" s:position=\"right\"/>\n</g>\n\n<g s:type=\"transformer_1p_1s\" s:width=\"35\" s:height=\"45\" transform=\"translate(140,450)\">\n  <s:alias val=\"transformer_1p_1s\"/>\n  <text class=\"nodelabel $cell_id\" x=\"25\" y=\"55\" s:attribute=\"ref\">X1</text>\n  <path d=\"M10,0 A5,5 0 0 1 10,10 A5,5 0 0 1 10,20 A5,5 0 0 1 10,30 A5,5 0 0 1 10,40\" class=\"$cell_id\"/>\n  <path d=\"M35,0 A5,5 0 0 0 35,10 A5,5 0 0 0 35,20 A5,5 0 0 0 35,30 A5,5 0 0 0 35,40\" class=\"$cell_id\"/>\n  <path d=\"M20,0 V40 M25,0 V40\" class=\"symbol $cell_id\"/>\n  <path d=\"M0,0 H10 M0,40 H10 M35,0 H45 M35,40 H45\" class=\"connect $cell_id\"/>\n  <g s:x=\"0\" s:y=\"0\" s:pid=\"L1.1\" s:position=\"left\"/>\n  <g s:x=\"0\" s:y=\"40\" s:pid=\"L1.2\" s:position=\"left\"/>\n  <g s:x=\"40\" s:y=\"0\" s:pid=\"L2.1\" s:position=\"right\"/>\n  <g s:x=\"40\" s:y=\"40\" s:pid=\"L2.2\" s:position=\"right\"/>\n</g>\n<!-- misc -->\n</svg>\n";
+const exampleDigital = Buffer("ewogICJtb2R1bGVzIjogewogICAgInVwM2Rvd241IjogewogICAgICAicG9ydHMiOiB7CiAgICAgICAgImNsb2NrIjogewogICAgICAgICAgImRpcmVjdGlvbiI6ICJpbnB1dCIsCiAgICAgICAgICAiYml0cyI6IFsgMiBdCiAgICAgICAgfSwKICAgICAgICAiZGF0YV9pbiI6IHsKICAgICAgICAgICJkaXJlY3Rpb24iOiAiaW5wdXQiLAogICAgICAgICAgImJpdHMiOiBbIDMsIDQsIDUsIDYsIDcsIDgsIDksIDEwLCAxMSBdCiAgICAgICAgfSwKICAgICAgICAidXAiOiB7CiAgICAgICAgICAiZGlyZWN0aW9uIjogImlucHV0IiwKICAgICAgICAgICJiaXRzIjogWyAxMiBdCiAgICAgICAgfSwKICAgICAgICAiZG93biI6IHsKICAgICAgICAgICJkaXJlY3Rpb24iOiAiaW5wdXQiLAogICAgICAgICAgImJpdHMiOiBbIDEzIF0KICAgICAgICB9LAogICAgICAgICJjYXJyeV9vdXQiOiB7CiAgICAgICAgICAiZGlyZWN0aW9uIjogIm91dHB1dCIsCiAgICAgICAgICAiYml0cyI6IFsgMTQgXQogICAgICAgIH0sCiAgICAgICAgImJvcnJvd19vdXQiOiB7CiAgICAgICAgICAiZGlyZWN0aW9uIjogIm91dHB1dCIsCiAgICAgICAgICAiYml0cyI6IFsgMTUgXQogICAgICAgIH0sCiAgICAgICAgImNvdW50X291dCI6IHsKICAgICAgICAgICJkaXJlY3Rpb24iOiAib3V0cHV0IiwKICAgICAgICAgICJiaXRzIjogWyAxNiwgMTcsIDE4LCAxOSwgMjAsIDIxLCAyMiwgMjMsIDI0IF0KICAgICAgICB9LAogICAgICAgICJwYXJpdHlfb3V0IjogewogICAgICAgICAgImRpcmVjdGlvbiI6ICJvdXRwdXQiLAogICAgICAgICAgImJpdHMiOiBbIDI1IF0KICAgICAgICB9CiAgICAgIH0sCiAgICAgICJjZWxscyI6IHsKICAgICAgICAiJGFkZCRpbnB1dC52OjE3JDMiOiB7CiAgICAgICAgICAidHlwZSI6ICIkYWRkIiwKICAgICAgICAgICJwb3J0X2RpcmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJBIjogImlucHV0IiwKICAgICAgICAgICAgIkIiOiAiaW5wdXQiLAogICAgICAgICAgICAiWSI6ICJvdXRwdXQiCiAgICAgICAgICB9LAogICAgICAgICAgImNvbm5lY3Rpb25zIjogewogICAgICAgICAgICAiQSI6IFsgMTYsIDE3LCAxOCwgMTksIDIwLCAyMSwgMjIsIDIzLCAyNCBdLAogICAgICAgICAgICAiQiI6IFsgIjEiLCAiMSIgXSwKICAgICAgICAgICAgIlkiOiBbIDI2LCAyNywgMjgsIDI5LCAzMCwgMzEsIDMyLCAzMywgMzQsIDM1IF0KICAgICAgICAgIH0KICAgICAgICB9LAogICAgICAgICIkYW5kJGlucHV0LnY6MjgkNSI6IHsKICAgICAgICAgICJ0eXBlIjogIiRhbmQiLAogICAgICAgICAgInBvcnRfZGlyZWN0aW9ucyI6IHsKICAgICAgICAgICAgIkEiOiAiaW5wdXQiLAogICAgICAgICAgICAiQiI6ICJpbnB1dCIsCiAgICAgICAgICAgICJZIjogIm91dHB1dCIKICAgICAgICAgIH0sCiAgICAgICAgICAiY29ubmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJBIjogWyAxMiBdLAogICAgICAgICAgICAiQiI6IFsgMzUgXSwKICAgICAgICAgICAgIlkiOiBbIDM2IF0KICAgICAgICAgIH0KICAgICAgICB9LAogICAgICAgICIkYW5kJGlucHV0LnY6MjkkNiI6IHsKICAgICAgICAgICJ0eXBlIjogIiRhbmQiLAogICAgICAgICAgInBvcnRfZGlyZWN0aW9ucyI6IHsKICAgICAgICAgICAgIkEiOiAiaW5wdXQiLAogICAgICAgICAgICAiQiI6ICJpbnB1dCIsCiAgICAgICAgICAgICJZIjogIm91dHB1dCIKICAgICAgICAgIH0sCiAgICAgICAgICAiY29ubmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJBIjogWyAxMyBdLAogICAgICAgICAgICAiQiI6IFsgMzcgXSwKICAgICAgICAgICAgIlkiOiBbIDM4IF0KICAgICAgICAgIH0KICAgICAgICB9LAogICAgICAgICIkcHJvY2RmZiQ0MCI6IHsKICAgICAgICAgICJ0eXBlIjogIiRkZmYiLAogICAgICAgICAgInBvcnRfZGlyZWN0aW9ucyI6IHsKICAgICAgICAgICAgIkNMSyI6ICJpbnB1dCIsCiAgICAgICAgICAgICJEIjogImlucHV0IiwKICAgICAgICAgICAgIlEiOiAib3V0cHV0IgogICAgICAgICAgfSwKICAgICAgICAgICJjb25uZWN0aW9ucyI6IHsKICAgICAgICAgICAgIkNMSyI6IFsgMiBdLAogICAgICAgICAgICAiRCI6IFsgMzksIDQwLCA0MSwgNDIsIDQzLCA0NCwgNDUsIDQ2LCA0NyBdLAogICAgICAgICAgICAiUSI6IFsgMTYsIDE3LCAxOCwgMTksIDIwLCAyMSwgMjIsIDIzLCAyNCBdCiAgICAgICAgICB9CiAgICAgICAgfSwKICAgICAgICAiJHByb2NkZmYkNDEiOiB7CiAgICAgICAgICAidHlwZSI6ICIkZGZmIiwKICAgICAgICAgICJwb3J0X2RpcmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJDTEsiOiAiaW5wdXQiLAogICAgICAgICAgICAiRCI6ICJpbnB1dCIsCiAgICAgICAgICAgICJRIjogIm91dHB1dCIKICAgICAgICAgIH0sCiAgICAgICAgICAiY29ubmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJDTEsiOiBbIDIgXSwKICAgICAgICAgICAgIkQiOiBbIDM2IF0sCiAgICAgICAgICAgICJRIjogWyAxNCBdCiAgICAgICAgICB9CiAgICAgICAgfSwKICAgICAgICAiJHByb2NkZmYkNDIiOiB7CiAgICAgICAgICAidHlwZSI6ICIkZGZmIiwKICAgICAgICAgICJwb3J0X2RpcmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJDTEsiOiAiaW5wdXQiLAogICAgICAgICAgICAiRCI6ICJpbnB1dCIsCiAgICAgICAgICAgICJRIjogIm91dHB1dCIKICAgICAgICAgIH0sCiAgICAgICAgICAiY29ubmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJDTEsiOiBbIDIgXSwKICAgICAgICAgICAgIkQiOiBbIDM4IF0sCiAgICAgICAgICAgICJRIjogWyAxNSBdCiAgICAgICAgICB9CiAgICAgICAgfSwKICAgICAgICAiJHByb2NkZmYkNDMiOiB7CiAgICAgICAgICAidHlwZSI6ICIkZGZmIiwKICAgICAgICAgICJwb3J0X2RpcmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJDTEsiOiAiaW5wdXQiLAogICAgICAgICAgICAiRCI6ICJpbnB1dCIsCiAgICAgICAgICAgICJRIjogIm91dHB1dCIKICAgICAgICAgIH0sCiAgICAgICAgICAiY29ubmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJDTEsiOiBbIDIgXSwKICAgICAgICAgICAgIkQiOiBbIDQ4IF0sCiAgICAgICAgICAgICJRIjogWyAyNSBdCiAgICAgICAgICB9CiAgICAgICAgfSwKICAgICAgICAiJHByb2NtdXgkMzYiOiB7CiAgICAgICAgICAidHlwZSI6ICIkcG11eCIsCiAgICAgICAgICAicG9ydF9kaXJlY3Rpb25zIjogewogICAgICAgICAgICAiQSI6ICJpbnB1dCIsCiAgICAgICAgICAgICJCIjogImlucHV0IiwKICAgICAgICAgICAgIlMiOiAiaW5wdXQiLAogICAgICAgICAgICAiWSI6ICJvdXRwdXQiCiAgICAgICAgICB9LAogICAgICAgICAgImNvbm5lY3Rpb25zIjogewogICAgICAgICAgICAiQSI6IFsgMTYsIDE3LCAxOCwgMTksIDIwLCAyMSwgMjIsIDIzLCAyNCBdLAogICAgICAgICAgICAiQiI6IFsgMjYsIDI3LCAyOCwgMjksIDMwLCAzMSwgMzIsIDMzLCAzNCwgNDksIDUwLCA1MSwgNTIsIDUzLCA1NCwgNTUsIDU2LCA1NywgMywgNCwgNSwgNiwgNywgOCwgOSwgMTAsIDExIF0sCiAgICAgICAgICAgICJTIjogWyA1OCwgNTksIDYwIF0sCiAgICAgICAgICAgICJZIjogWyAzOSwgNDAsIDQxLCA0MiwgNDMsIDQ0LCA0NSwgNDYsIDQ3IF0KICAgICAgICAgIH0KICAgICAgICB9LAogICAgICAgICIkcHJvY211eCQzN19DTVAwIjogewogICAgICAgICAgInR5cGUiOiAiJGVxIiwKICAgICAgICAgICJwb3J0X2RpcmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJBIjogImlucHV0IiwKICAgICAgICAgICAgIkIiOiAiaW5wdXQiLAogICAgICAgICAgICAiWSI6ICJvdXRwdXQiCiAgICAgICAgICB9LAogICAgICAgICAgImNvbm5lY3Rpb25zIjogewogICAgICAgICAgICAiQSI6IFsgMTMsIDEyIF0sCiAgICAgICAgICAgICJCIjogWyAiMCIsICIxIiBdLAogICAgICAgICAgICAiWSI6IFsgNTggXQogICAgICAgICAgfQogICAgICAgIH0sCiAgICAgICAgIiRwcm9jbXV4JDM4X0NNUDAiOiB7CiAgICAgICAgICAidHlwZSI6ICIkZXEiLAogICAgICAgICAgInBvcnRfZGlyZWN0aW9ucyI6IHsKICAgICAgICAgICAgIkEiOiAiaW5wdXQiLAogICAgICAgICAgICAiQiI6ICJpbnB1dCIsCiAgICAgICAgICAgICJZIjogIm91dHB1dCIKICAgICAgICAgIH0sCiAgICAgICAgICAiY29ubmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJBIjogWyAxMywgMTIgXSwKICAgICAgICAgICAgIkIiOiBbICIxIiwgIjAiIF0sCiAgICAgICAgICAgICJZIjogWyA1OSBdCiAgICAgICAgICB9CiAgICAgICAgfSwKICAgICAgICAiJHByb2NtdXgkMzlfQ01QMCI6IHsKICAgICAgICAgICJ0eXBlIjogIiRlcSIsCiAgICAgICAgICAicG9ydF9kaXJlY3Rpb25zIjogewogICAgICAgICAgICAiQSI6ICJpbnB1dCIsCiAgICAgICAgICAgICJCIjogImlucHV0IiwKICAgICAgICAgICAgIlkiOiAib3V0cHV0IgogICAgICAgICAgfSwKICAgICAgICAgICJjb25uZWN0aW9ucyI6IHsKICAgICAgICAgICAgIkEiOiBbIDEzLCAxMiBdLAogICAgICAgICAgICAiQiI6IFsgIjAiLCAiMCIgXSwKICAgICAgICAgICAgIlkiOiBbIDYwIF0KICAgICAgICAgIH0KICAgICAgICB9LAogICAgICAgICIkcmVkdWNlX3hvciRpbnB1dC52OjI3JDQiOiB7CiAgICAgICAgICAidHlwZSI6ICIkcmVkdWNlX3hvciIsCiAgICAgICAgICAicG9ydF9kaXJlY3Rpb25zIjogewogICAgICAgICAgICAiQSI6ICJpbnB1dCIsCiAgICAgICAgICAgICJZIjogIm91dHB1dCIKICAgICAgICAgIH0sCiAgICAgICAgICAiY29ubmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJBIjogWyAzOSwgNDAsIDQxLCA0MiwgNDMsIDQ0LCA0NSwgNDYsIDQ3IF0sCiAgICAgICAgICAgICJZIjogWyA0OCBdCiAgICAgICAgICB9CiAgICAgICAgfSwKICAgICAgICAiJHN1YiRpbnB1dC52OjE2JDIiOiB7CiAgICAgICAgICAidHlwZSI6ICIkc3ViIiwKICAgICAgICAgICJwb3J0X2RpcmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJBIjogImlucHV0IiwKICAgICAgICAgICAgIkIiOiAiaW5wdXQiLAogICAgICAgICAgICAiWSI6ICJvdXRwdXQiCiAgICAgICAgICB9LAogICAgICAgICAgImNvbm5lY3Rpb25zIjogewogICAgICAgICAgICAiQSI6IFsgMTYsIDE3LCAxOCwgMTksIDIwLCAyMSwgMjIsIDIzLCAyNCBdLAogICAgICAgICAgICAiQiI6IFsgIjEiLCAiMCIsICIxIiBdLAogICAgICAgICAgICAiWSI6IFsgNDksIDUwLCA1MSwgNTIsIDUzLCA1NCwgNTUsIDU2LCA1NywgMzcgXQogICAgICAgICAgfQogICAgICAgIH0KICAgICAgfQogICAgfQogIH0KfQo=","base64");
 const exampleAnalog = Buffer("ewogICJtb2R1bGVzIjogewogICAgInJlc2lzdG9yX2RpdmlkZXIiOiB7CiAgICAgICJwb3J0cyI6IHsKICAgICAgICAiQSI6IHsKICAgICAgICAgICJkaXJlY3Rpb24iOiAiaW5wdXQiLAogICAgICAgICAgImJpdHMiOiBbMl0KICAgICAgICB9LAogICAgICAgICJCIjogewogICAgICAgICAgImRpcmVjdGlvbiI6ICJpbnB1dCIsCiAgICAgICAgICAiYml0cyI6IFszXQogICAgICAgIH0sCiAgICAgICAgIkEgQU5EIEIiOiB7CiAgICAgICAgICAiZGlyZWN0aW9uIjogIm91dHB1dCIsCiAgICAgICAgICAiYml0cyI6IFs0XQogICAgICAgIH0KICAgICAgfSwKICAgICAgImNlbGxzIjogewogICAgICAgICJSMSI6IHsKICAgICAgICAgICJ0eXBlIjogInJfdiIsCiAgICAgICAgICAiY29ubmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJBIjogWzJdLAogICAgICAgICAgICAiQiI6IFs1XQogICAgICAgICAgfSwKICAgICAgICAgICJhdHRyaWJ1dGVzIjogewogICAgICAgICAgICAidmFsdWUiOiIxMGsiCiAgICAgICAgICB9CiAgICAgICAgfSwKICAgICAgICAiUjIiOiB7CiAgICAgICAgICAidHlwZSI6ICJyX3YiLAogICAgICAgICAgImNvbm5lY3Rpb25zIjogewogICAgICAgICAgICAiQSI6IFszXSwKICAgICAgICAgICAgIkIiOiBbNV0KICAgICAgICAgIH0sCiAgICAgICAgICAiYXR0cmlidXRlcyI6IHsKICAgICAgICAgICAgInZhbHVlIjoiMTBrIgogICAgICAgICAgfQogICAgICAgIH0sCiAgICAgICAgIlExIjogewogICAgICAgICAgInR5cGUiOiAicV9wbnAiLAogICAgICAgICAgInBvcnRfZGlyZWN0aW9ucyI6IHsKICAgICAgICAgICAgIkMiOiAiaW5wdXQiLAogICAgICAgICAgICAiQiI6ICJpbnB1dCIsCiAgICAgICAgICAgICJFIjogIm91dHB1dCIKICAgICAgICAgIH0sCiAgICAgICAgICAiY29ubmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJDIjogWzZdLAogICAgICAgICAgICAiQiI6IFs1XSwKICAgICAgICAgICAgIkUiOiBbN10KICAgICAgICAgIH0KICAgICAgICB9LAogICAgICAgICJSMyI6IHsKICAgICAgICAgICJ0eXBlIjogInJfdiIsCiAgICAgICAgICAiY29ubmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJBIjogWzddLAogICAgICAgICAgICAiQiI6IFs4XQogICAgICAgICAgfSwKICAgICAgICAgICJhdHRyaWJ1dGVzIjogewogICAgICAgICAgICAidmFsdWUiOiIxMGsiCiAgICAgICAgICB9CiAgICAgICAgfSwKICAgICAgICAiUjQiOiB7CiAgICAgICAgICAidHlwZSI6ICJyX3YiLAogICAgICAgICAgImNvbm5lY3Rpb25zIjogewogICAgICAgICAgICAiQSI6IFs3XSwKICAgICAgICAgICAgIkIiOiBbOV0KICAgICAgICAgIH0sCiAgICAgICAgICAiYXR0cmlidXRlcyI6IHsKICAgICAgICAgICAgInZhbHVlIjoiMTBrIgogICAgICAgICAgfQogICAgICAgIH0sCiAgICAgICAgIlI1IjogewogICAgICAgICAgInR5cGUiOiAicl92IiwKICAgICAgICAgICJjb25uZWN0aW9ucyI6IHsKICAgICAgICAgICAgIkEiOiBbNF0sCiAgICAgICAgICAgICJCIjogWzEyXQogICAgICAgICAgfSwKICAgICAgICAgICJhdHRyaWJ1dGVzIjogewogICAgICAgICAgICAidmFsdWUiOiIxMGsiCiAgICAgICAgICB9CiAgICAgICAgfSwKICAgICAgICAiUTIiOiB7CiAgICAgICAgICAidHlwZSI6ICJxX3BucCIsCiAgICAgICAgICAicG9ydF9kaXJlY3Rpb25zIjogewogICAgICAgICAgICAiQyI6ICJpbnB1dCIsCiAgICAgICAgICAgICJCIjogImlucHV0IiwKICAgICAgICAgICAgIkUiOiAib3V0cHV0IgogICAgICAgICAgfSwKICAgICAgICAgICJjb25uZWN0aW9ucyI6IHsKICAgICAgICAgICAgIkMiOiBbMTBdLAogICAgICAgICAgICAiQiI6IFs5XSwKICAgICAgICAgICAgIkUiOiBbNF0KICAgICAgICAgIH0KICAgICAgICB9LAogICAgICAgICJ2Y2MiOiB7CiAgICAgICAgICAidHlwZSI6ICJ2Y2MiLAogICAgICAgICAgImNvbm5lY3Rpb25zIjogewogICAgICAgICAgICAiQSI6IFs2XQogICAgICAgICAgfSwKICAgICAgICAgICJhdHRyaWJ1dGVzIjogewogICAgICAgICAgICAibmFtZSI6IlZDQyIKICAgICAgICAgIH0KICAgICAgICB9LAogICAgICAgICJ2Y2MyIjogewogICAgICAgICAgInR5cGUiOiAidmNjIiwKICAgICAgICAgICJjb25uZWN0aW9ucyI6IHsKICAgICAgICAgICAgIkEiOiBbMTBdCiAgICAgICAgICB9LAogICAgICAgICAgImF0dHJpYnV0ZXMiOiB7CiAgICAgICAgICAgICJuYW1lIjoiVkNDIgogICAgICAgICAgfQogICAgICAgIH0sCiAgICAgICAgImduZCI6IHsKICAgICAgICAgICJ0eXBlIjogImduZCIsCiAgICAgICAgICAicG9ydF9kaXJlY3Rpb25zIjogewogICAgICAgICAgICAiQSI6ICJpbnB1dCIKICAgICAgICAgIH0sCiAgICAgICAgICAiY29ubmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJBIjogWzhdCiAgICAgICAgICB9LAogICAgICAgICAgImF0dHJpYnV0ZXMiOiB7CiAgICAgICAgICAgICJuYW1lIjoiREdORCIKICAgICAgICAgIH0KICAgICAgICB9LAogICAgICAgICJnbmQyIjogewogICAgICAgICAgInR5cGUiOiAiZ25kIiwKICAgICAgICAgICJwb3J0X2RpcmVjdGlvbnMiOiB7CiAgICAgICAgICAgICJBIjogImlucHV0IgogICAgICAgICAgfSwKICAgICAgICAgICJjb25uZWN0aW9ucyI6IHsKICAgICAgICAgICAgIkEiOiBbMTJdCiAgICAgICAgICB9LAogICAgICAgICAgImF0dHJpYnV0ZXMiOiB7CiAgICAgICAgICAgICJuYW1lIjoiREdORCIKICAgICAgICAgIH0KICAgICAgICB9CiAgICAgIH0KICAgIH0KICB9Cn0K","base64");
 const schema = Buffer("ewogICJkZXNjcmlwdGlvbiI6ICJKU09OIFNjaGVtYSBZb3N5cyBuZXRsaXN0cyBKU09OIGZvcm1hdCIsCiAgInR5cGUiOiAib2JqZWN0IiwKICAvLyBhbiBlbXB0eSBvYmplY3QgaXMgaW52YWxpZAogICJyZXF1aXJlZCI6IFsibW9kdWxlcyJdLAogICJlcnJvck1lc3NhZ2UiOiB7CiAgICAidHlwZSI6ICJuZXRsaXN0IG11c3QgYmUgYSBKU09OIG9iamVjdCIsCiAgICAicmVxdWlyZWQiOiAibmV0bGlzdCBtdXN0IGhhdmUgYSBtb2R1bGVzIHByb3BlcnR5IiwKICB9LAogICJwcm9wZXJ0aWVzIjogewogICAgIm1vZHVsZXMiOiB7CiAgICAgICJ0eXBlIjogIm9iamVjdCIsCiAgICAgIC8vIHRoZXJlIG11c3QgYmUgYXQgbGVhc3Qgb25lIG1vZHVsZQogICAgICAibWluUHJvcGVydGllcyI6IDEsCiAgICAgICAgImVycm9yTWVzc2FnZSI6IHsKICAgICAgICAgICJ0eXBlIjogIm5ldGxpc3QgbW9kdWxlcyBtdXN0IGJlIG9iamVjdHMiLAogICAgICAgICAgIm1pblByb3BlcnRpZXMiOiAibmV0bGlzdCBtdXN0IGhhdmUgYXQgbGVhc3Qgb25lIG1vZHVsZSIsCiAgICAgICAgfSwKICAgICAgImFkZGl0aW9uYWxQcm9wZXJ0aWVzIjogewogICAgICAgICJ0eXBlIjogIm9iamVjdCIsCiAgICAgICAgInByb3BlcnRpZXMiOiB7CiAgICAgICAgICAicG9ydHMiOiB7CiAgICAgICAgICAgICJ0eXBlIjogIm9iamVjdCIsCiAgICAgICAgICAgICJhZGRpdGlvbmFsUHJvcGVydGllcyI6IHsKICAgICAgICAgICAgICAidHlwZSI6ICJvYmplY3QiLAogICAgICAgICAgICAgIC8vIGFsbCBwb3J0cyBtdXN0IGhhdmUgYml0cyBhbmQgYSBkaXJlY3Rpb24KICAgICAgICAgICAgICAicmVxdWlyZWQiOiBbImRpcmVjdGlvbiIsICJiaXRzIl0sCiAgICAgICAgICAgICAgInByb3BlcnRpZXMiOiB7CiAgICAgICAgICAgICAgICAiZGlyZWN0aW9uIjogewogICAgICAgICAgICAgICAgICAiZW51bSI6IFsiaW5wdXQiLCAib3V0cHV0IiwgImlub3V0Il0KICAgICAgICAgICAgICAgIH0sCiAgICAgICAgICAgICAgICAiYml0cyI6IHsKICAgICAgICAgICAgICAgICAgInR5cGUiOiAiYXJyYXkiLAogICAgICAgICAgICAgICAgICAvLyBiaXRzIGNhbiBiZSB0aGUgc3RyaW5nICIwIiwgIjEiLCAieCIsICJ6Iiwgb3IgYSBudW1iZXIuCiAgICAgICAgICAgICAgICAgICJpdGVtcyI6IHsKICAgICAgICAgICAgICAgICAgICAib25lT2YiOlt7InR5cGUiOiJudW1iZXIifSwgeyJlbnVtIjpbIjAiLCIxIiwieCIsInoiXX1dCiAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICB9CiAgICAgICAgICAgIH0KICAgICAgICAgIH0sCiAgICAgICAgICAiY2VsbHMiOiB7CiAgICAgICAgICAgICJ0eXBlIjogIm9iamVjdCIsCiAgICAgICAgICAgICJhZGRpdGlvbmFsUHJvcGVydGllcyI6IHsKICAgICAgICAgICAgICAidHlwZSI6ICJvYmplY3QiLAogICAgICAgICAgICAgIC8vIGFsbCBjZWxscyBtdXN0IGhhdmUgYSB0eXBlIGFuZCBjb25uZWN0aW9ucwogICAgICAgICAgICAgICJyZXF1aXJlZCI6IFsKICAgICAgICAgICAgICAgICJ0eXBlIiwKICAgICAgICAgICAgICAgICJjb25uZWN0aW9ucyIKICAgICAgICAgICAgICBdLAogICAgICAgICAgICAgICJwcm9wZXJ0aWVzIjogewogICAgICAgICAgICAgICAgInR5cGUiOnsidHlwZSI6InN0cmluZyJ9LAogICAgICAgICAgICAgICAgImNvbm5lY3Rpb25zIjogewogICAgICAgICAgICAgICAgICAidHlwZSI6ICJvYmplY3QiLAogICAgICAgICAgICAgICAgICAiYWRkaXRpb25hbFByb3BlcnRpZXMiOiB7CiAgICAgICAgICAgICAgICAgICAgInR5cGUiOiJhcnJheSIsCiAgICAgICAgICAgICAgICAgICAgIml0ZW1zIjogewogICAgICAgICAgICAgICAgICAgICAgIm9uZU9mIjpbeyJ0eXBlIjoibnVtYmVyIn0sIHsiZW51bSI6WyIwIiwiMSIsIngiLCJ6Il19XQogICAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgICAgfQogICAgICAgICAgICAgICAgfSwKICAgICAgICAgICAgICAgIC8vIHBvcnQgZGlyZWN0aW9ucyBhcmUgb3B0aW9uYWwKICAgICAgICAgICAgICAgICJwb3J0X2RpcmVjdGlvbnMiOnsKICAgICAgICAgICAgICAgICAgInR5cGUiOiAib2JqZWN0IiwKICAgICAgICAgICAgICAgICAgImFkZGl0aW9uYWxQcm9wZXJ0aWVzIjogewogICAgICAgICAgICAgICAgICAgICJlbnVtIjogWyJpbnB1dCIsICJvdXRwdXQiLCAiaW5vdXQiXQogICAgICAgICAgICAgICAgICB9CiAgICAgICAgICAgICAgICB9LAogICAgICAgICAgICAgICAgLy8gbmV0bGlzdHN2ZyBkb2Vzbid0IHVzZSB0aGVzZSB5ZXQKICAgICAgICAgICAgICAgICJoaWRlX25hbWUiOiB7ImVudW0iOlswLCAxXX0sCiAgICAgICAgICAgICAgICAicGFyYW1ldGVycyI6IHsidHlwZSI6ICJvYmplY3QifSwKICAgICAgICAgICAgICAgICJhdHRyaWJ1dGVzIjogeyJ0eXBlIjogIm9iamVjdCJ9CiAgICAgICAgICAgICAgfQogICAgICAgICAgICB9CiAgICAgICAgICB9LAogICAgICAgICAgLy8gbm90IHlldCB1c2VkIGJ5IG5ldGxpc3RzdmcKICAgICAgICAgICJuZXRuYW1lcyI6IHsKICAgICAgICAgICAgInR5cGUiOiAib2JqZWN0IiwKICAgICAgICAgICAgImFkZGl0aW9uYWxQcm9wZXJ0aWVzIjogewogICAgICAgICAgICAgICJ0eXBlIjogIm9iamVjdCIsCiAgICAgICAgICAgICAgInByb3BlcnRpZXMiOiB7CiAgICAgICAgICAgICAgICAiYml0cyI6IHsKICAgICAgICAgICAgICAgICAgInR5cGUiOiAiYXJyYXkiLAogICAgICAgICAgICAgICAgICAvLyBiaXRzIGNhbiBiZSB0aGUgc3RyaW5nICIwIiwgIjEiLCAieCIsICJ6Iiwgb3IgYSBudW1iZXIuCiAgICAgICAgICAgICAgICAgICJpdGVtcyI6IHsKICAgICAgICAgICAgICAgICAgICAib25lT2YiOiBbeyJ0eXBlIjogIm51bWJlciJ9LCB7ImVudW0iOiBbIjAiLCAiMSIsICJ4IiwgInoiXX1dCiAgICAgICAgICAgICAgICAgIH0KICAgICAgICAgICAgICAgIH0sCiAgICAgICAgICAgICAgICAiaGlkZV9uYW1lIjogeyJlbnVtIjogWzAsIDFdfSwKICAgICAgICAgICAgICAgICJhdHRyaWJ1dGVzIjogeyJ0eXBlIjogIm9iamVjdCJ9CiAgICAgICAgICAgICAgfQogICAgICAgICAgICB9CiAgICAgICAgICB9LAogICAgICAgICAgImF0dHJpYnV0ZXMiOiB7CiAgICAgICAgICAgICJ0eXBlIjogIm9iamVjdCIsCiAgICAgICAgICAgICJwcm9wZXJ0aWVzIjogewogICAgICAgICAgICAgICJ0b3AiOiB7ImVudW0iOiBbMCwgMSwgIjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwIiwgIjAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMDAxIl19CiAgICAgICAgICAgIH0KICAgICAgICAgIH0KICAgICAgICB9LAogICAgICAgIC8vIHRoZXJlIG11c3QgZWl0aGVyIGJlIHBvcnRzIG9yIGNlbGxzIGF0dHJpYnV0ZQogICAgICAgICJhbnlPZiI6IFt7InJlcXVpcmVkIjogWyJwb3J0cyJdfSx7InJlcXVpcmVkIjogWyJjZWxscyJdfV0KICAgICAgfQogICAgfQogIH0KfQo=","base64");
 const exampleDigitalJson = json5.parse(exampleDigital);
