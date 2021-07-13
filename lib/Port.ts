@@ -1,5 +1,5 @@
 import Cell from './Cell';
-import {SigsByConstName} from './FlatModule';
+import {SigsByConstName, FlatModule} from './FlatModule';
 import Yosys from './YosysModel';
 import _ = require('lodash');
 import { ElkModel } from './elkGraph';
@@ -32,13 +32,14 @@ export class Port {
 
     public findConstants(sigsByConstantName: SigsByConstName,
                          maxNum: number,
-                         constantCollector: Cell[]): number {
+                         constantCollector: Cell[],
+                         parent: string): number {
         let constNameCollector = '';
         let constNumCollector: number[] = [];
         const portSigs: Yosys.Signals = this.value;
         portSigs.forEach((portSig, portSigIndex) => {
             // is constant?
-            if (portSig === '0' || portSig === '1') {
+            if (portSig === '0' || portSig === '1' || portSig === 'x') {
             maxNum += 1;
             constNameCollector += portSig;
             // replace the constant with new signal num
@@ -51,7 +52,8 @@ export class Port {
                     constNumCollector,
                     portSigIndex,
                     sigsByConstantName,
-                    constantCollector);
+                    constantCollector,
+                    parent);
                 // reset name and num collectors
                 constNameCollector = '';
                 constNumCollector = [];
@@ -63,7 +65,8 @@ export class Port {
                 constNumCollector,
                 portSigs.length,
                 sigsByConstantName,
-                constantCollector);
+                constantCollector,
+                parent);
         }
         return maxNum;
     }
@@ -73,7 +76,7 @@ export class Port {
         templatePorts: any[],
         dir: string,
     ): ElkModel.Port {
-        const nkey = this.parentNode.Key;
+        const nkey = this.parentNode.parent + '.' + this.parentNode.Key;
         const type = this.parentNode.getTemplate()[1]['s:type'];
         if (index === 0) {
             const ret: ElkModel.Port = {
@@ -84,7 +87,7 @@ export class Port {
                 y: Number(templatePorts[0][1]['s:y']),
             };
 
-            if ((type === 'generic' || type === 'join') && dir === 'in') {
+            if ((type === 'generic' || type === 'sub_even' || type === 'sub_odd' || type === 'join') && dir === 'in') {
                 ret.labels = [{
                     id: nkey + '.' + this.key + '.label',
                     text: this.key,
@@ -93,9 +96,13 @@ export class Port {
                     width: (6 * this.key.length),
                     height: 11,
                 }];
+                if (type === 'sub_even' || type === 'sub_odd') {
+                    ret.layoutOptions = {'org.eclipse.elk.port.side': 'WEST'};
+                }
             }
 
-            if ((type === 'generic' || type === 'split') && dir === 'out') {
+            if ((type === 'generic' || type === 'sub_even' || type === 'sub_odd' || type === 'split')
+                 && dir === 'out') {
                 ret.labels = [{
                     id: nkey + '.' + this.key + '.label',
                     text: this.key,
@@ -104,6 +111,14 @@ export class Port {
                     width: (6 * this.key.length),
                     height: 11,
                 }];
+                if (type === 'sub_even' || type === 'sub_odd') {
+                    ret.layoutOptions = {'org.eclipse.elk.port.side': 'EAST'};
+                }
+            }
+
+            if (type === 'sub_even' || type === 'sub_odd') {
+                delete ret.x;
+                delete ret.y;
             }
             return ret;
         } else {
@@ -115,7 +130,7 @@ export class Port {
                 x: Number(templatePorts[0][1]['s:x']),
                 y: (index) * gap + Number(templatePorts[0][1]['s:y']),
             };
-            if (type === 'generic') {
+            if (type === 'generic' || type === 'sub_even' || type === 'sub_odd') {
                 ret.labels = [{
                     id: nkey + '.' + this.key + '.label',
                     text: this.key,
@@ -124,6 +139,17 @@ export class Port {
                     width: (6 * this.key.length),
                     height: 11,
                 }];
+                if (dir === 'in') {
+                    ret.layoutOptions = {'org.eclipse.elk.port.side': 'WEST'};
+                }
+                if (dir === 'out') {
+                    ret.layoutOptions = {'org.eclipse.elk.port.side': 'EAST'};
+                }
+            }
+
+            if (type === 'sub_even' || type === 'sub_odd') {
+                delete ret.x;
+                delete ret.y;
             }
             return ret;
         }
@@ -133,7 +159,8 @@ export class Port {
                            constants: number[],
                            currIndex: number,
                            signalsByConstantName: SigsByConstName,
-                           constantCollector: Cell[]) {
+                           constantCollector: Cell[],
+                           parent: string) {
         // we've been appending to nameCollector, so reverse to get const name
         const constName = nameCollector.split('').reverse().join('');
         // if the constant has already been used
@@ -147,7 +174,7 @@ export class Port {
                 this.value[i] = constSig;
             });
         } else {
-            constantCollector.push(Cell.fromConstantInfo(constName, constants));
+            constantCollector.push(Cell.fromConstantInfo(constName, constants, parent));
             signalsByConstantName[constName] = constants;
         }
     }
